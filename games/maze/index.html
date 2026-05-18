@@ -1717,7 +1717,6 @@ function updateOneMonster(m, dt, sprinting) {
   const wantsDirectApproach =
     (newState === 'hunt' || newState === 'stare') &&
     distCells === 0 &&
-    distWorld > MONSTER_CATCH_DIST + 0.15 &&
     speed > 0.01;
   if (wantsDirectApproach) {
     const dx = yaw.position.x - monster.position.x;
@@ -1726,7 +1725,7 @@ function updateOneMonster(m, dt, sprinting) {
     if (len > 0.01) {
       const speedMult = newState === 'stare' ? 1.0 : 0.42;
       const worldSpeed = speed * CELL * speedMult;
-      const step = Math.min(worldSpeed * dt, len - MONSTER_CATCH_DIST * 0.6);
+      const step = Math.min(worldSpeed * dt, Math.max(0, len - 0.05));
       monster.position.x += (dx / len) * step;
       monster.position.z += (dz / len) * step;
       isMoving = true;
