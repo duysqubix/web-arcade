@@ -116,26 +116,62 @@
         transparent 3px
       );
     }
-    #jumpscare {
+    body.jumpscare-active canvas {
+      animation: jsViolentShake 0.42s cubic-bezier(0.5, 0.1, 0.5, 0.9) infinite alternate;
+      filter: saturate(2.4) contrast(1.55) brightness(1.4) hue-rotate(-12deg);
+    }
+    body.jumpscare-active #red-vignette {
+      opacity: 1 !important;
+      animation: jsVignettePulse 0.18s linear infinite alternate;
+    }
+    body.jumpscare-active #grain {
+      opacity: 0.55 !important;
+      animation: jsGrainBurst 0.08s steps(2, end) infinite;
+    }
+    body.jumpscare-active #scanlines { opacity: 0.32 !important; }
+    body.jumpscare-active::before {
+      content: '';
       position: fixed; inset: 0;
-      display: none; align-items: center; justify-content: center;
-      z-index: 150;
-      background: #000;
+      pointer-events: none; z-index: 140;
+      background:
+        radial-gradient(ellipse at 22% 38%, rgba(120, 4, 4, 0.0) 0%, rgba(120, 4, 4, 0.0) 22%, rgba(140, 0, 0, 0.7) 70%, rgba(60, 0, 0, 0.95) 100%),
+        radial-gradient(circle at 70% 60%, rgba(80, 0, 0, 0.3) 0%, transparent 40%);
+      mix-blend-mode: multiply;
+      animation: jsBloodShift 0.15s steps(3) infinite;
     }
-    #jumpscare.active { display: flex; animation: shakeOut 0.6s ease-out forwards; }
-    #jumpscare canvas { width: 100vw; height: 100vh; object-fit: cover; }
-    @keyframes shakeOut {
-      0% { transform: scale(1.6) translate(30px, -15px); }
-      15% { transform: scale(2.4) translate(-40px, 20px); }
-      30% { transform: scale(2.1) translate(35px, 25px); }
-      45% { transform: scale(2.6) translate(-25px, -35px); }
-      60% { transform: scale(2.2) translate(15px, 10px); }
-      80% { transform: scale(2.3) translate(-5px, -8px); }
-      100% { transform: scale(2.2); }
+    body.jumpscare-active::after {
+      content: '';
+      position: fixed; inset: 0;
+      pointer-events: none; z-index: 141;
+      background:
+        radial-gradient(circle at 28% 30%, rgba(180, 0, 0, 0.45) 0%, transparent 14%),
+        radial-gradient(circle at 64% 45%, rgba(160, 0, 0, 0.4) 0%, transparent 11%),
+        radial-gradient(circle at 80% 70%, rgba(140, 0, 0, 0.5) 0%, transparent 18%),
+        radial-gradient(circle at 12% 78%, rgba(180, 10, 10, 0.55) 0%, transparent 12%);
+      mix-blend-mode: multiply;
     }
-    @keyframes jsFlash {
-      0% { opacity: 1; }
-      100% { opacity: 0; }
+    @keyframes jsViolentShake {
+      0%   { transform: translate(-14px, 6px) skew(-2deg, 1deg) scale(1.02); }
+      18%  { transform: translate(12px, -10px) skew(3deg, -2deg) scale(1.05); }
+      36%  { transform: translate(-9px, 8px) skew(-1deg, 2deg) scale(1.03); }
+      54%  { transform: translate(16px, -4px) skew(2deg, -1deg) scale(1.04); }
+      72%  { transform: translate(-6px, 12px) skew(-3deg, 1deg) scale(1.06); }
+      100% { transform: translate(10px, -8px) skew(1deg, -2deg) scale(1.03); }
+    }
+    @keyframes jsVignettePulse {
+      0%   { transform: scale(1.0); filter: brightness(1.0); }
+      100% { transform: scale(1.08); filter: brightness(1.4); }
+    }
+    @keyframes jsGrainBurst {
+      0%   { transform: translate(0, 0); }
+      50%  { transform: translate(2px, -3px); }
+      100% { transform: translate(-3px, 2px); }
+    }
+    @keyframes jsBloodShift {
+      0%   { transform: translate(0, 0) scale(1.0); opacity: 0.85; }
+      33%  { transform: translate(-4px, 2px) scale(1.04); opacity: 0.95; }
+      66%  { transform: translate(3px, -2px) scale(1.06); opacity: 0.78; }
+      100% { transform: translate(-1px, 1px) scale(1.0); opacity: 0.9; }
     }
     #overlay {
       position: fixed; inset: 0;
@@ -213,8 +249,6 @@
   <div id="red-vignette"></div>
   <div id="grain"></div>
   <div id="scanlines"></div>
-
-  <div id="jumpscare"><canvas id="jumpscare-canvas"></canvas></div>
 
   <div id="overlay" class="hidden">
     <h1>THE MAZE</h1>
@@ -752,6 +786,50 @@ class AudioSystem {
   }
   setGrowl(_amt) { /* removed: was a positional giveaway */ }
   monsterStep(_distance) { /* removed: was a positional giveaway */ }
+  glassShatter() {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    for (const f of [3400, 4700, 6100, 7600, 9100]) {
+      const osc = this.ctx.createOscillator();
+      const g = this.ctx.createGain();
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(f * (0.92 + Math.random() * 0.16), t);
+      osc.frequency.exponentialRampToValueAtTime(f * 0.55, t + 0.45);
+      g.gain.setValueAtTime(0.07, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+      osc.connect(g).connect(this.sfxGain);
+      osc.start(t);
+      osc.stop(t + 0.55);
+    }
+    const shardCount = 12;
+    for (let i = 0; i < shardCount; i++) {
+      const delay = Math.random() * 0.6;
+      const osc = this.ctx.createOscillator();
+      const g = this.ctx.createGain();
+      osc.type = 'triangle';
+      const start = 5000 + Math.random() * 4000;
+      osc.frequency.setValueAtTime(start, t + delay);
+      osc.frequency.exponentialRampToValueAtTime(start * 0.35, t + delay + 0.15);
+      g.gain.setValueAtTime(0.04, t + delay);
+      g.gain.exponentialRampToValueAtTime(0.001, t + delay + 0.2);
+      osc.connect(g).connect(this.sfxGain);
+      osc.start(t + delay);
+      osc.stop(t + delay + 0.22);
+    }
+    const len = (this.ctx.sampleRate * 0.6) | 0;
+    const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / (len * 0.25));
+    const src = this.ctx.createBufferSource();
+    src.buffer = buf;
+    const filt = this.ctx.createBiquadFilter();
+    filt.type = 'highpass';
+    filt.frequency.value = 3500;
+    const ng = this.ctx.createGain();
+    ng.gain.value = 0.18;
+    src.connect(filt).connect(ng).connect(this.sfxGain);
+    src.start(t);
+  }
   scream() {
     if (!this.ctx) return;
     const t = this.ctx.currentTime;
@@ -2004,111 +2082,68 @@ actionBtn.addEventListener('click', () => {
 /* ============================================================
    JUMPSCARE
    ============================================================ */
-const jumpscareEl = document.getElementById('jumpscare');
-const jumpscareCanvas = document.getElementById('jumpscare-canvas');
-
-function drawJumpscareFace() {
-  const w = innerWidth, h = innerHeight;
-  jumpscareCanvas.width = w;
-  jumpscareCanvas.height = h;
-  const ctx = jumpscareCanvas.getContext('2d');
-
-  ctx.fillStyle = '#000';
-  ctx.fillRect(0, 0, w, h);
-
-  const cx = w / 2, cy = h * 0.5;
-  const faceW = Math.min(w, h) * 0.55;
-  const faceH = faceW * 1.3;
-
-  const grad = ctx.createRadialGradient(cx, cy, faceW * 0.1, cx, cy, faceW);
-  grad.addColorStop(0, '#3a2a2a');
-  grad.addColorStop(0.45, '#1a0e0e');
-  grad.addColorStop(1, '#000');
-  ctx.fillStyle = grad;
-  ctx.beginPath();
-  ctx.ellipse(cx, cy, faceW * 0.55, faceH * 0.55, 0, 0, Math.PI * 2);
-  ctx.fill();
-
-  ctx.fillStyle = '#000';
-  for (const ex of [-1, 1]) {
-    ctx.beginPath();
-    ctx.ellipse(cx + ex * faceW * 0.16, cy - faceH * 0.08, faceW * 0.12, faceH * 0.09, 0, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  ctx.shadowColor = '#ffffaa';
-  ctx.shadowBlur = 40;
-  ctx.fillStyle = '#fffadd';
-  for (const ex of [-1, 1]) {
-    ctx.beginPath();
-    ctx.arc(cx + ex * faceW * 0.16, cy - faceH * 0.08, faceW * 0.025, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  ctx.shadowBlur = 0;
-
-  ctx.fillStyle = '#0a0000';
-  ctx.beginPath();
-  ctx.ellipse(cx, cy + faceH * 0.18, faceW * 0.18, faceH * 0.16, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = '#d8c0a0';
-  for (let i = -3; i <= 3; i++) {
-    const tx = cx + i * faceW * 0.05;
-    const top = cy + faceH * 0.06;
-    ctx.beginPath();
-    ctx.moveTo(tx - 5, top);
-    ctx.lineTo(tx + 5, top);
-    ctx.lineTo(tx, top + (12 + Math.random() * 14));
-    ctx.fill();
-  }
-  for (let i = -3; i <= 3; i++) {
-    const tx = cx + i * faceW * 0.05;
-    const bot = cy + faceH * 0.3;
-    ctx.beginPath();
-    ctx.moveTo(tx - 5, bot);
-    ctx.lineTo(tx + 5, bot);
-    ctx.lineTo(tx, bot - (12 + Math.random() * 14));
-    ctx.fill();
-  }
-
-  ctx.strokeStyle = '#7a0000';
-  ctx.lineWidth = 3;
-  for (let i = 0; i < 6; i++) {
-    ctx.beginPath();
-    const sx = cx + (Math.random() - 0.5) * faceW * 0.5;
-    const sy = cy + faceH * 0.18;
-    ctx.moveTo(sx, sy);
-    ctx.lineTo(sx + (Math.random() - 0.5) * 30, sy + 80 + Math.random() * 200);
-    ctx.stroke();
-  }
-
-  const vg = ctx.createRadialGradient(cx, cy, faceW * 0.4, cx, cy, Math.max(w, h));
-  vg.addColorStop(0, 'rgba(0,0,0,0)');
-  vg.addColorStop(1, '#000');
-  ctx.fillStyle = vg;
-  ctx.fillRect(0, 0, w, h);
-}
-
 function jumpscareAndDie() {
   if (gameState !== 'playing') return;
   gameState = 'dead';
   wonTime = (performance.now() - startTime) / 1000;
-  audio.scream();
   document.exitPointerLock();
 
-  const flash = document.createElement('div');
-  flash.style.cssText = 'position:fixed;inset:0;background:#fff;z-index:151;pointer-events:none;animation:jsFlash 0.18s ease-out forwards';
-  document.body.appendChild(flash);
-  setTimeout(() => flash.remove(), 250);
+  let killer = monsters[0];
+  let minDist = Infinity;
+  for (const m of monsters) {
+    const d = distanceMonsterToPlayer(m);
+    if (d < minDist) { minDist = d; killer = m; }
+  }
+
+  if (killer && killer.root.userData.head) {
+    const headPos = new THREE.Vector3();
+    killer.root.userData.head.getWorldPosition(headPos);
+    const dx = yaw.position.x - killer.root.position.x;
+    const dz = yaw.position.z - killer.root.position.z;
+    const len = Math.hypot(dx, dz) || 0.5;
+    const nx = dx / len;
+    const nz = dz / len;
+
+    const camX = headPos.x + nx * 0.38;
+    const camZ = headPos.z + nz * 0.38;
+    const camY = headPos.y - 0.18;
+    yaw.position.set(camX, camY, camZ);
+
+    const toHeadX = headPos.x - camX;
+    const toHeadY = headPos.y - camY;
+    const toHeadZ = headPos.z - camZ;
+    const horiz = Math.sqrt(toHeadX * toHeadX + toHeadZ * toHeadZ);
+    yaw.rotation.set(0, Math.atan2(-toHeadX, -toHeadZ), 0);
+    pitch.rotation.set(Math.atan2(toHeadY, horiz), 0, 0);
+    camera.position.set(0, 0, 0);
+  }
+
+  flashlight.intensity = 18;
+  flashlight.distance = 5;
+  flashlight.angle = Math.PI * 0.32;
+
+  if (audio.ctx) {
+    const t = audio.ctx.currentTime;
+    if (audio.musicGain) {
+      audio.musicGain.gain.cancelScheduledValues(t);
+      audio.musicGain.gain.setValueAtTime(0, t);
+    }
+    if (audio.ambientGain) {
+      audio.ambientGain.gain.cancelScheduledValues(t);
+      audio.ambientGain.gain.setValueAtTime(0, t);
+    }
+  }
+  setTimeout(() => {
+    audio.scream();
+    if (audio.glassShatter) audio.glassShatter();
+  }, 55);
+
+  document.body.classList.add('jumpscare-active');
 
   setTimeout(() => {
-    drawJumpscareFace();
-    jumpscareEl.classList.add('active');
-  }, 90);
-
-  setTimeout(() => {
-    jumpscareEl.classList.remove('active');
+    document.body.classList.remove('jumpscare-active');
     refreshOverlay();
-  }, 1800);
+  }, 2400);
 }
 
 /* ============================================================
