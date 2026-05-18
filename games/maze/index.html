@@ -481,8 +481,6 @@ class AudioSystem {
     this.ambientGain = this.ctx.createGain();
     this.ambientGain.gain.value = 0.5;
     this.ambientGain.connect(this.master);
-    this._startMusic();
-    this._startAmbientBed();
     this._scheduleAmbientEvents();
   }
   resume() {
@@ -589,14 +587,13 @@ class AudioSystem {
     const fire = () => {
       if (!this.ctx) return;
       const choice = Math.random();
-      if (choice < 0.25) this.whisper();
-      else if (choice < 0.5) this.distantFootstep();
-      else if (choice < 0.7) this.creak();
-      else if (choice < 0.85) this.distantImpact();
-      else this.wind();
-      this.ambientScheduler = setTimeout(fire, 6000 + Math.random() * 14000);
+      if (choice < 0.32) this.whisper();
+      else if (choice < 0.65) this.distantFootstep();
+      else if (choice < 0.85) this.creak();
+      else this.distantImpact();
+      this.ambientScheduler = setTimeout(fire, 7000 + Math.random() * 13000);
     };
-    this.ambientScheduler = setTimeout(fire, 3500 + Math.random() * 4500);
+    this.ambientScheduler = setTimeout(fire, 4000 + Math.random() * 5000);
   }
   whisper() {
     if (!this.ctx) return;
@@ -903,8 +900,8 @@ let walls = [];
 let mazeGroup;
 let goalMesh;
 
-const NUM_MONSTERS = 3;
-const MONSTER_ROLES = ['stalker', 'ambusher', 'teleporter'];
+const NUM_MONSTERS = 1;
+const MONSTER_ROLES = ['stalker'];
 
 let monsters = [];
 
@@ -1611,11 +1608,11 @@ function updateOneMonster(m, dt, sprinting) {
   const veryClose = distCells <= 3;
   const losToPlayer = hasLineOfSight(monster.position.x, monster.position.z, yaw.position.x, yaw.position.z);
 
-  if (monsterMixer.role === 'teleporter' && !inView) {
+  if (!inView) {
     const now = performance.now() / 1000;
     const sinceTeleport = now - monsterMixer.lastTeleport;
-    const minCooldown = monsterMixer.state === 'hunt' ? 9 : 6;
-    if (sinceTeleport > minCooldown && distCells > 4) {
+    const minCooldown = monsterMixer.state === 'hunt' ? 14 : 11;
+    if (sinceTeleport > minCooldown && distCells > 5) {
       const dest = findTeleportCellBehindPlayer();
       if (dest) {
         monsterMixer.cell = { x: dest.x, y: dest.y };
