@@ -1791,13 +1791,13 @@ function updateOneMonster(m, dt, sprinting) {
 
   if (distWorld < 6 || newState === 'stare') {
     const target = Math.atan2(
-      yaw.position.x - monster.position.x,
-      yaw.position.z - monster.position.z
+      monster.position.x - yaw.position.x,
+      monster.position.z - yaw.position.z
     );
     let diff = target - monster.rotation.y;
     while (diff > Math.PI) diff -= Math.PI * 2;
     while (diff < -Math.PI) diff += Math.PI * 2;
-    const turnRate = newState === 'stare' ? 1.2 : 3.0;
+    const turnRate = newState === 'stare' ? 1.5 : 4.5;
     monster.rotation.y += diff * Math.min(1, dt * turnRate);
     if (monster.userData.head && distWorld < 4) {
       monster.userData.head.rotation.x = -0.12;
@@ -2195,12 +2195,6 @@ function animate() {
     camera.position.x = Math.cos(walkBob * 0.5) * 0.04;
 
     monsterDist = updateMonsters(dt, isSprinting);
-
-    if (monsterDist !== undefined && monsterDist < 5) {
-      const shake = Math.max(0, (5 - monsterDist) / 5) * 0.06;
-      camera.position.x += (Math.random() - 0.5) * shake;
-      camera.position.y += (Math.random() - 0.5) * shake;
-    }
 
     const proximity = monsterDist !== undefined ? Math.max(0, Math.min(1, (16 - monsterDist) / 14)) : 0;
     const heartRate = 0.8 + proximity * 2.6;
