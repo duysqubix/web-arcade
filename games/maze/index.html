@@ -923,6 +923,8 @@ function newMixerState() {
     pathTimer: 0,
     stalkRepathTimer: 0,
     stareHoldTimer: 0,
+    stareTime: 0,
+    forceHuntUntil: 0,
     lastTeleport: 0,
     ambushTarget: null,
     ambushTimer: 0,
@@ -1593,9 +1595,17 @@ function updateOneMonster(m, dt, sprinting) {
   const distCells = cellDist(monsterC, playerC);
   const inView = isMonsterInPlayerView(m);
 
-  if (inView) monsterMixer.stareHoldTimer = 0.45;
-  else monsterMixer.stareHoldTimer = Math.max(0, monsterMixer.stareHoldTimer - dt);
-  const staring = monsterMixer.stareHoldTimer > 0;
+  const nowSec = performance.now() / 1000;
+  const forceHunt = nowSec < monsterMixer.forceHuntUntil;
+
+  if (inView) {
+    monsterMixer.stareHoldTimer = 0.45;
+    monsterMixer.stareTime += dt;
+  } else {
+    monsterMixer.stareHoldTimer = Math.max(0, monsterMixer.stareHoldTimer - dt);
+    monsterMixer.stareTime = Math.max(0, monsterMixer.stareTime - dt * 1.5);
+  }
+  const staring = monsterMixer.stareHoldTimer > 0 && !forceHunt;
 
   const heard = sprinting && distCells <= MONSTER_HEAR_RADIUS;
   const veryClose = distCells <= 3;
@@ -1623,7 +1633,9 @@ function updateOneMonster(m, dt, sprinting) {
   const directSees = losToPlayer && distCells <= MONSTER_SIGHT_RADIUS;
 
   let newState = monsterMixer.state;
-  if (staring) {
+  if (forceHunt) {
+    newState = 'hunt';
+  } else if (staring) {
     newState = 'stare';
   } else if (heard || veryClose || directSees) {
     newState = 'hunt';
@@ -1646,7 +1658,7 @@ function updateOneMonster(m, dt, sprinting) {
   monsterMixer.state = newState;
 
   monsterMixer.pathTimer -= dt;
-  if (monsterMixer.pathTimer <= 0 && newState === 'hunt') {
+  if (monsterMixer.pathTimer <= 0 && (newState === 'hunt' || newState === 'stare')) {
     const path = bfsPath(monsterC, playerC);
     monsterMixer.path = path || [];
     monsterMixer.pathTimer = MONSTER_REPATH_INTERVAL;
@@ -1665,11 +1677,13 @@ function updateOneMonster(m, dt, sprinting) {
   monsterMixer.stalkRepathTimer -= dt;
 
   let speed;
-  if (newState === 'stare') speed = 0;
-  else if (newState === 'hunt') speed = MONSTER_SPEED_HUNT;
+  if (newState === 'stare') {
+    const creep = Math.max(0, Math.min(1, (monsterMixer.stareTime - 1.2) / 2.0));
+    speed = MONSTER_SPEED_HUNT * 0.22 * creep;
+  } else if (newState === 'hunt') speed = MONSTER_SPEED_HUNT;
   else if (newState === 'stalk') speed = MONSTER_SPEED_STALK;
   else speed = MONSTER_SPEED_IDLE;
-  if (inView && newState !== 'stare') speed *= 0.35;
+  if (inView && newState !== 'stare' && !forceHunt) speed *= 0.35;
   if (!inView && (newState === 'hunt' || newState === 'stalk')) speed *= 1.25;
 
   if (monsterMixer.progress >= 1) {
@@ -1679,7 +1693,7 @@ function updateOneMonster(m, dt, sprinting) {
       audio.monsterStep(distWorld);
     }
     let next;
-    if ((newState === 'hunt' || newState === 'stalk') && monsterMixer.path && monsterMixer.path.length) {
+    if ((newState === 'hunt' || newState === 'stalk' || newState === 'stare') && monsterMixer.path && monsterMixer.path.length) {
       next = monsterMixer.path.shift();
     } else if (newState === 'wander') {
       next = chooseRandomNeighbor(monsterMixer.cell);
@@ -1698,10 +1712,29 @@ function updateOneMonster(m, dt, sprinting) {
   const fz = monsterMixer.fromCell.y * CELL + CELL / 2;
   const tx = monsterMixer.toCell.x * CELL + CELL / 2;
   const tz = monsterMixer.toCell.y * CELL + CELL / 2;
-  monster.position.x = fx + (tx - fx) * monsterMixer.progress;
-  monster.position.z = fz + (tz - fz) * monsterMixer.progress;
+  let isMoving = (tx !== fx || tz !== fz) && speed > 0.01;
 
-  const isMoving = (tx !== fx || tz !== fz) && speed > 0.01;
+  const wantsDirectApproach =
+    (newState === 'hunt' || newState === 'stare') &&
+    distCells === 0 &&
+    distWorld > MONSTER_CATCH_DIST + 0.15 &&
+    speed > 0.01;
+  if (wantsDirectApproach) {
+    const dx = yaw.position.x - monster.position.x;
+    const dz = yaw.position.z - monster.position.z;
+    const len = Math.hypot(dx, dz);
+    if (len > 0.01) {
+      const speedMult = newState === 'stare' ? 1.0 : 0.42;
+      const worldSpeed = speed * CELL * speedMult;
+      const step = Math.min(worldSpeed * dt, len - MONSTER_CATCH_DIST * 0.6);
+      monster.position.x += (dx / len) * step;
+      monster.position.z += (dz / len) * step;
+      isMoving = true;
+    }
+  } else {
+    monster.position.x = fx + (tx - fx) * monsterMixer.progress;
+    monster.position.z = fz + (tz - fz) * monsterMixer.progress;
+  }
   const bobSpeed = newState === 'hunt' ? 0.011 : 0.005;
   monster.position.y = newState === 'stare'
     ? 0
@@ -1722,10 +1755,11 @@ function updateOneMonster(m, dt, sprinting) {
   }
 
   const limbs = monster.userData.limbs;
-  if (limbs && isMoving && newState !== 'stare') {
-    const phase = performance.now() * (newState === 'hunt' ? 0.008 : 0.0045);
+  if (limbs && isMoving) {
+    const phaseRate = newState === 'hunt' ? 0.008 : (newState === 'stare' ? 0.003 : 0.0045);
+    const phase = performance.now() * phaseRate;
     const swing = Math.sin(phase);
-    const amp = newState === 'hunt' ? 0.55 : 0.32;
+    const amp = newState === 'hunt' ? 0.55 : (newState === 'stare' ? 0.18 : 0.32);
     if (limbs.LHip) limbs.LHip.rotation.x =  swing * amp;
     if (limbs.RHip) limbs.RHip.rotation.x = -swing * amp;
     if (limbs.LShoulder) limbs.LShoulder.rotation.x = -swing * amp * 0.6;
@@ -1797,7 +1831,7 @@ window.addEventListener('keydown', (e) => {
   if (e.code === 'KeyT' && pointerLocked) {
     const fx = -Math.sin(yaw.rotation.y);
     const fz = -Math.cos(yaw.rotation.y);
-    const dist = 2.5;
+    const dist = 6.0;
     const idx = ((window.__testIdx || 0) % monsters.length);
     window.__testIdx = (window.__testIdx || 0) + 1;
     const m = monsters[idx];
@@ -1814,6 +1848,10 @@ window.addEventListener('keydown', (e) => {
       m.mixer.path = [];
       m.mixer.pathTimer = 0;
       m.mixer.lastTeleport = performance.now() / 1000;
+      m.mixer.forceHuntUntil = (performance.now() / 1000) + 5;
+      m.mixer.state = 'hunt';
+      m.mixer.stareHoldTimer = 0;
+      m.mixer.stareTime = 0;
       m.root.lookAt(yaw.position.x, m.root.position.y, yaw.position.z);
     }
   }
@@ -2221,13 +2259,16 @@ const loadingEl = document.getElementById('loading');
     gameState = 'playing';
     yaw.position.set(CELL / 2, EYE, 0.4);
     yaw.rotation.set(0, Math.PI, 0);
-    pitch.rotation.x = 0.18;
+    pitch.rotation.x = 0.05;
     if (monsters[0]) {
       const m = monsters[0];
       m.root.position.set(CELL / 2, 0, 3.6);
-      m.mixer.cell = { x: 0, y: 0 };
-      m.mixer.fromCell = { x: 0, y: 0 };
-      m.mixer.toCell = { x: 0, y: 0 };
+      const cellX = 0, cellY = Math.floor(3.6 / CELL);
+      m.mixer.cell = { x: cellX, y: cellY };
+      m.mixer.fromCell = { x: cellX, y: cellY };
+      m.mixer.toCell = { x: cellX, y: cellY };
+      m.mixer.forceHuntUntil = (performance.now() / 1000) + 30;
+      m.mixer.state = 'hunt';
       m.root.lookAt(yaw.position.x, m.root.position.y + 1.5, yaw.position.z);
     }
   }
