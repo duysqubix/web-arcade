@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Web Arcade — Single-File Browser Games</title>
+  <meta name="description" content="A collection of self-contained, single-file HTML games. No installs, no builds — just open and play." />
+  <style>
+    :root {
+      --bg: #0a0608;
+      --fg: #e8d8c0;
+      --muted: #9a8870;
+      --accent: #b85040;
+      --accent-bright: #ff7060;
+      --card-bg: #14090a;
+      --card-border: #3a1818;
+      --card-hover-border: #b85040;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: 'Courier New', ui-monospace, monospace;
+      overflow-x: hidden;
+    }
+    body {
+      background:
+        radial-gradient(ellipse at top, rgba(184, 80, 64, 0.08) 0%, transparent 60%),
+        radial-gradient(ellipse at bottom, rgba(40, 10, 10, 0.4) 0%, transparent 60%),
+        var(--bg);
+      padding: 60px 24px 80px;
+    }
+    /* film grain */
+    body::before {
+      content: '';
+      position: fixed; inset: 0;
+      pointer-events: none;
+      z-index: 1;
+      opacity: 0.06;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.8'/></svg>");
+      mix-blend-mode: overlay;
+    }
+    /* scanlines */
+    body::after {
+      content: '';
+      position: fixed; inset: 0;
+      pointer-events: none;
+      z-index: 2;
+      opacity: 0.05;
+      background: repeating-linear-gradient(0deg, rgba(0,0,0,0.4), rgba(0,0,0,0.4) 1px, transparent 1px, transparent 3px);
+    }
+    .container { max-width: 1100px; margin: 0 auto; position: relative; z-index: 3; }
+    header {
+      text-align: center;
+      margin-bottom: 64px;
+    }
+    h1 {
+      font-size: clamp(40px, 7vw, 72px);
+      letter-spacing: clamp(6px, 1vw, 14px);
+      color: var(--accent);
+      text-shadow: 0 0 28px rgba(184, 80, 64, 0.5);
+      margin-bottom: 16px;
+    }
+    .tagline {
+      font-size: 14px;
+      letter-spacing: 4px;
+      color: var(--muted);
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+    .blurb {
+      max-width: 580px;
+      margin: 24px auto 0;
+      color: var(--fg);
+      opacity: 0.8;
+      line-height: 1.6;
+      font-size: 14px;
+    }
+    .blurb a {
+      color: var(--accent-bright);
+      text-decoration: none;
+      border-bottom: 1px dashed currentColor;
+    }
+    .blurb a:hover { color: var(--fg); }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: 24px;
+    }
+    .card {
+      display: block;
+      text-decoration: none;
+      color: inherit;
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 6px;
+      overflow: hidden;
+      transition: transform 0.2s, border-color 0.2s, box-shadow 0.2s;
+      position: relative;
+    }
+    .card:hover {
+      transform: translateY(-2px);
+      border-color: var(--card-hover-border);
+      box-shadow: 0 8px 28px rgba(184, 80, 64, 0.18);
+    }
+    .card.coming-soon {
+      opacity: 0.45;
+      cursor: not-allowed;
+      pointer-events: none;
+    }
+    .thumb {
+      aspect-ratio: 16 / 9;
+      width: 100%;
+      position: relative;
+      background: #000;
+      overflow: hidden;
+    }
+    .thumb svg {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    .card-body {
+      padding: 18px 20px 22px;
+    }
+    .card-title {
+      font-size: 22px;
+      letter-spacing: 4px;
+      color: var(--accent);
+      margin-bottom: 8px;
+      text-transform: uppercase;
+    }
+    .card-desc {
+      font-size: 13px;
+      line-height: 1.55;
+      opacity: 0.85;
+      margin-bottom: 14px;
+    }
+    .tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .tag {
+      font-size: 10px;
+      letter-spacing: 2px;
+      padding: 3px 8px;
+      border: 1px solid rgba(184, 80, 64, 0.5);
+      background: rgba(184, 80, 64, 0.08);
+      color: var(--accent-bright);
+      text-transform: uppercase;
+      border-radius: 2px;
+    }
+    .meta {
+      text-align: center;
+      margin-top: 64px;
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: 3px;
+    }
+    .meta a {
+      color: var(--accent-bright);
+      text-decoration: none;
+    }
+    .meta a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="tagline">A collection by duysqubix</div>
+      <h1>WEB ARCADE</h1>
+      <p class="blurb">
+        Single-file, zero-install, no-build browser games. Each one is one HTML file —
+        load it, play it, share it. Built for the web, for the love of it.
+        <br /><br />
+        Source: <a href="https://github.com/duysqubix/web-arcade" target="_blank" rel="noopener">github.com/duysqubix/web-arcade</a>
+      </p>
+    </header>
+
+    <div class="grid">
+      <a class="card" href="games/maze/">
+        <div class="thumb">
+          <svg viewBox="0 0 320 180" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <radialGradient id="vign" cx="50%" cy="55%" r="60%">
+                <stop offset="0%" stop-color="#1a0a0a"/>
+                <stop offset="100%" stop-color="#000"/>
+              </radialGradient>
+              <radialGradient id="beam" cx="50%" cy="55%" r="25%">
+                <stop offset="0%" stop-color="#a0a0c8" stop-opacity="0.6"/>
+                <stop offset="100%" stop-color="#a0a0c8" stop-opacity="0"/>
+              </radialGradient>
+              <filter id="grain">
+                <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch"/>
+                <feColorMatrix values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.18 0"/>
+                <feComposite in2="SourceGraphic" operator="in"/>
+              </filter>
+            </defs>
+            <rect width="320" height="180" fill="url(#vign)"/>
+            <g opacity="0.4">
+              <rect x="20" y="60" width="60" height="22" fill="#3a1a10" stroke="#0a0404" stroke-width="1"/>
+              <rect x="80" y="60" width="60" height="22" fill="#4a2018" stroke="#0a0404" stroke-width="1"/>
+              <rect x="140" y="60" width="60" height="22" fill="#3a1a10" stroke="#0a0404" stroke-width="1"/>
+              <rect x="200" y="60" width="60" height="22" fill="#4a2018" stroke="#0a0404" stroke-width="1"/>
+              <rect x="260" y="60" width="60" height="22" fill="#3a1a10" stroke="#0a0404" stroke-width="1"/>
+              <rect x="-10" y="82" width="60" height="22" fill="#4a2018" stroke="#0a0404" stroke-width="1"/>
+              <rect x="50" y="82" width="60" height="22" fill="#3a1a10" stroke="#0a0404" stroke-width="1"/>
+              <rect x="110" y="82" width="60" height="22" fill="#4a2018" stroke="#0a0404" stroke-width="1"/>
+              <rect x="170" y="82" width="60" height="22" fill="#3a1a10" stroke="#0a0404" stroke-width="1"/>
+              <rect x="230" y="82" width="60" height="22" fill="#4a2018" stroke="#0a0404" stroke-width="1"/>
+            </g>
+            <ellipse cx="160" cy="95" rx="80" ry="55" fill="url(#beam)"/>
+            <g>
+              <path d="M140 130 L155 95 L165 95 L180 130 L175 165 L145 165 Z" fill="#0a0608"/>
+              <ellipse cx="160" cy="80" rx="14" ry="22" fill="#1a0e12"/>
+              <ellipse cx="160" cy="55" rx="12" ry="16" fill="#1a0e12"/>
+              <g fill="#000">
+                <rect x="150" y="48" width="1" height="22"/>
+                <rect x="153" y="46" width="1" height="26"/>
+                <rect x="157" y="50" width="1" height="24"/>
+                <rect x="161" y="48" width="1" height="28"/>
+                <rect x="165" y="46" width="1" height="22"/>
+                <rect x="168" y="50" width="1" height="24"/>
+              </g>
+              <circle cx="156" cy="55" r="1.6" fill="#fff8d8"/>
+              <circle cx="164" cy="55" r="1.6" fill="#fff8d8"/>
+              <circle cx="156" cy="55" r="3" fill="#fff8d8" opacity="0.18"/>
+              <circle cx="164" cy="55" r="3" fill="#fff8d8" opacity="0.18"/>
+              <rect x="142" y="68" width="3" height="48" fill="#1a0e12"/>
+              <rect x="175" y="68" width="3" height="48" fill="#1a0e12"/>
+              <g fill="#0a0608">
+                <rect x="141" y="116" width="1" height="6"/>
+                <rect x="143" y="116" width="1" height="7"/>
+                <rect x="145" y="116" width="1" height="6"/>
+                <rect x="175" y="116" width="1" height="6"/>
+                <rect x="177" y="116" width="1" height="7"/>
+                <rect x="179" y="116" width="1" height="6"/>
+              </g>
+            </g>
+            <rect y="155" width="320" height="25" fill="#0a0604"/>
+            <rect filter="url(#grain)" width="320" height="180"/>
+          </svg>
+        </div>
+        <div class="card-body">
+          <div class="card-title">The Maze</div>
+          <div class="card-desc">
+            Procedurally-generated dungeon maze. Something else is in there with you —
+            it hears your footsteps, hunts you down dark corridors, and the only way out
+            is the glowing green beacon. Don't run unless you must.
+          </div>
+          <div class="tags">
+            <span class="tag">Horror</span>
+            <span class="tag">First-Person</span>
+            <span class="tag">Three.js</span>
+            <span class="tag">Procedural</span>
+          </div>
+        </div>
+      </a>
+      <div class="card coming-soon">
+        <div class="thumb">
+          <svg viewBox="0 0 320 180" xmlns="http://www.w3.org/2000/svg">
+            <rect width="320" height="180" fill="#0a0608"/>
+            <text x="50%" y="50%" text-anchor="middle" dominant-baseline="middle"
+                  font-family="Courier New" font-size="14" letter-spacing="6" fill="#3a1818">
+              ? ? ?
+            </text>
+          </svg>
+        </div>
+        <div class="card-body">
+          <div class="card-title">More Soon</div>
+          <div class="card-desc">
+            More single-file experiments incoming. Got an idea? Open an issue on GitHub.
+          </div>
+          <div class="tags">
+            <span class="tag">WIP</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="meta">
+      <p>Built with vanilla web tech. View on
+      <a href="https://github.com/duysqubix/web-arcade" target="_blank" rel="noopener">GitHub</a>.</p>
+    </div>
+  </div>
+</body>
+</html>
