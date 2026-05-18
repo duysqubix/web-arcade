@@ -125,11 +125,17 @@
     #jumpscare.active { display: flex; animation: shakeOut 0.6s ease-out forwards; }
     #jumpscare canvas { width: 100vw; height: 100vh; object-fit: cover; }
     @keyframes shakeOut {
-      0% { transform: scale(1.4) translate(20px, -10px); }
-      20% { transform: scale(2.0) translate(-30px, 15px); }
-      40% { transform: scale(1.8) translate(25px, 18px); }
-      60% { transform: scale(2.2) translate(-15px, -25px); }
-      100% { transform: scale(2.0); }
+      0% { transform: scale(1.6) translate(30px, -15px); }
+      15% { transform: scale(2.4) translate(-40px, 20px); }
+      30% { transform: scale(2.1) translate(35px, 25px); }
+      45% { transform: scale(2.6) translate(-25px, -35px); }
+      60% { transform: scale(2.2) translate(15px, 10px); }
+      80% { transform: scale(2.3) translate(-5px, -8px); }
+      100% { transform: scale(2.2); }
+    }
+    @keyframes jsFlash {
+      0% { opacity: 1; }
+      100% { opacity: 0; }
     }
     #overlay {
       position: fixed; inset: 0;
@@ -218,8 +224,19 @@
     <button id="action-btn">ENTER</button>
   </div>
 
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
 <script type="module">
-import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 
 /* ============================================================
    CONFIG
@@ -235,12 +252,13 @@ const SPEED_WALK = 4.2;
 const SPEED_RUN = 7.5;
 const MOUSE_SENS = 0.0024;
 
-const MONSTER_SPEED_IDLE = 1.4;
-const MONSTER_SPEED_HUNT = 2.6;
-const MONSTER_HEAR_RADIUS = 8;
+const MONSTER_SPEED_IDLE = 1.0;
+const MONSTER_SPEED_STALK = 1.7;
+const MONSTER_SPEED_HUNT = 2.9;
+const MONSTER_HEAR_RADIUS = 9;
 const MONSTER_SIGHT_RADIUS = 6;
-const MONSTER_CATCH_DIST = 0.85;
-const MONSTER_REPATH_INTERVAL = 0.45;
+const MONSTER_CATCH_DIST = 0.95;
+const MONSTER_REPATH_INTERVAL = 0.4;
 
 const STAMINA_MAX = 4.0;
 const STAMINA_REGEN = 0.45;
@@ -437,72 +455,272 @@ class AudioSystem {
   constructor() {
     this.ctx = null;
     this.master = null;
-    this.growlGain = null;
+    this.musicGain = null;
+    this.sfxGain = null;
     this.ambientGain = null;
+    this.ambientScheduler = null;
   }
   ensure() {
     if (this.ctx) return;
     this.ctx = new (window.AudioContext || window.webkitAudioContext)();
     this.master = this.ctx.createGain();
     this.master.gain.value = 0.85;
-    this.master.connect(this.ctx.destination);
-    this._startAmbient();
-    this._startGrowl();
+    const comp = this.ctx.createDynamicsCompressor();
+    comp.threshold.value = -8;
+    comp.knee.value = 6;
+    comp.ratio.value = 4;
+    comp.attack.value = 0.005;
+    comp.release.value = 0.25;
+    this.master.connect(comp).connect(this.ctx.destination);
+    this.musicGain = this.ctx.createGain();
+    this.musicGain.gain.value = 0.6;
+    this.musicGain.connect(this.master);
+    this.sfxGain = this.ctx.createGain();
+    this.sfxGain.gain.value = 0.85;
+    this.sfxGain.connect(this.master);
+    this.ambientGain = this.ctx.createGain();
+    this.ambientGain.gain.value = 0.5;
+    this.ambientGain.connect(this.master);
+    this._startMusic();
+    this._startAmbientBed();
+    this._scheduleAmbientEvents();
   }
   resume() {
     if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume();
   }
-  _noiseBuffer(seconds) {
+  _noiseBuffer(seconds, type) {
     const len = (this.ctx.sampleRate * seconds) | 0;
     const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
     const d = buf.getChannelData(0);
-    let last = 0;
-    for (let i = 0; i < len; i++) {
-      const w = Math.random() * 2 - 1;
-      d[i] = (last + 0.02 * w) / 1.02;
-      last = d[i];
-      d[i] *= 3.5;
+    if (type === 'pink') {
+      let b0 = 0, b1 = 0, b2 = 0;
+      for (let i = 0; i < len; i++) {
+        const w = Math.random() * 2 - 1;
+        b0 = 0.99765 * b0 + w * 0.099046;
+        b1 = 0.963 * b1 + w * 0.2965164;
+        b2 = 0.57 * b2 + w * 1.0526913;
+        d[i] = (b0 + b1 + b2 + w * 0.1848) * 0.4;
+      }
+    } else {
+      let last = 0;
+      for (let i = 0; i < len; i++) {
+        const w = Math.random() * 2 - 1;
+        d[i] = (last + 0.02 * w) / 1.02;
+        last = d[i];
+        d[i] *= 3.5;
+      }
     }
     return buf;
   }
-  _startAmbient() {
-    const buf = this._noiseBuffer(4);
+  _startMusic() {
+    const baseFreq = 55;
+    const osc1 = this.ctx.createOscillator();
+    osc1.type = 'sine';
+    osc1.frequency.value = baseFreq;
+    const osc2 = this.ctx.createOscillator();
+    osc2.type = 'triangle';
+    osc2.frequency.value = baseFreq * Math.pow(2, 1 / 12);
+    const osc3 = this.ctx.createOscillator();
+    osc3.type = 'sine';
+    osc3.frequency.value = baseFreq * 1.5;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 220;
+    filter.Q.value = 0.7;
+    const lfo = this.ctx.createOscillator();
+    lfo.frequency.value = 0.05;
+    const lfoGain = this.ctx.createGain();
+    lfoGain.gain.value = 22;
+    lfo.connect(lfoGain);
+    lfoGain.connect(osc1.detune);
+    lfoGain.connect(osc2.detune);
+    const fLfo = this.ctx.createOscillator();
+    fLfo.frequency.value = 0.07;
+    const fLfoGain = this.ctx.createGain();
+    fLfoGain.gain.value = 60;
+    fLfo.connect(fLfoGain);
+    fLfoGain.connect(filter.frequency);
+    const droneGain = this.ctx.createGain();
+    droneGain.gain.value = 0.18;
+    osc1.connect(filter);
+    osc2.connect(filter);
+    osc3.connect(filter);
+    filter.connect(droneGain).connect(this.musicGain);
+    osc1.start();
+    osc2.start();
+    osc3.start();
+    lfo.start();
+    fLfo.start();
+    const choirBuf = this._noiseBuffer(8, 'pink');
+    const choirSrc = this.ctx.createBufferSource();
+    choirSrc.buffer = choirBuf;
+    choirSrc.loop = true;
+    const choirFilter = this.ctx.createBiquadFilter();
+    choirFilter.type = 'bandpass';
+    choirFilter.frequency.value = 600;
+    choirFilter.Q.value = 5;
+    const choirLfo = this.ctx.createOscillator();
+    choirLfo.frequency.value = 0.13;
+    const choirLfoGain = this.ctx.createGain();
+    choirLfoGain.gain.value = 400;
+    choirLfo.connect(choirLfoGain);
+    choirLfoGain.connect(choirFilter.frequency);
+    const choirGain = this.ctx.createGain();
+    choirGain.gain.value = 0.07;
+    choirSrc.connect(choirFilter).connect(choirGain).connect(this.musicGain);
+    choirSrc.start();
+    choirLfo.start();
+  }
+  _startAmbientBed() {
+    const buf = this._noiseBuffer(4, 'brown');
     const src = this.ctx.createBufferSource();
     src.buffer = buf;
     src.loop = true;
     const filt = this.ctx.createBiquadFilter();
     filt.type = 'lowpass';
-    filt.frequency.value = 110;
+    filt.frequency.value = 90;
     const g = this.ctx.createGain();
-    g.gain.value = 0.08;
-    src.connect(filt).connect(g).connect(this.master);
+    g.gain.value = 0.06;
+    src.connect(filt).connect(g).connect(this.ambientGain);
     src.start();
-    this.ambientGain = g;
   }
-  _startGrowl() {
+  _scheduleAmbientEvents() {
+    if (this.ambientScheduler) clearTimeout(this.ambientScheduler);
+    const fire = () => {
+      if (!this.ctx) return;
+      const choice = Math.random();
+      if (choice < 0.25) this.whisper();
+      else if (choice < 0.5) this.distantFootstep();
+      else if (choice < 0.7) this.creak();
+      else if (choice < 0.85) this.distantImpact();
+      else this.wind();
+      this.ambientScheduler = setTimeout(fire, 6000 + Math.random() * 14000);
+    };
+    this.ambientScheduler = setTimeout(fire, 3500 + Math.random() * 4500);
+  }
+  whisper() {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    const duration = 1.4 + Math.random() * 1.4;
+    const len = (this.ctx.sampleRate * duration) | 0;
+    const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) {
+      const env = Math.sin((i / len) * Math.PI);
+      d[i] = (Math.random() * 2 - 1) * env;
+    }
+    const src = this.ctx.createBufferSource();
+    src.buffer = buf;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.value = 800 + Math.random() * 1400;
+    filter.Q.value = 9 + Math.random() * 4;
+    const formant = this.ctx.createOscillator();
+    formant.frequency.value = 3 + Math.random() * 4;
+    const formantGain = this.ctx.createGain();
+    formantGain.gain.value = 200 + Math.random() * 300;
+    formant.connect(formantGain).connect(filter.frequency);
+    const g = this.ctx.createGain();
+    g.gain.value = 0.07 + Math.random() * 0.06;
+    src.connect(filter).connect(g).connect(this.sfxGain);
+    src.start(t);
+    formant.start(t);
+    formant.stop(t + duration);
+  }
+  distantFootstep() {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    const count = 2 + ((Math.random() * 3) | 0);
+    for (let i = 0; i < count; i++) {
+      const delay = i * (0.4 + Math.random() * 0.2);
+      const len = (this.ctx.sampleRate * 0.16) | 0;
+      const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let j = 0; j < len; j++) d[j] = (Math.random() * 2 - 1) * (1 - j / len);
+      const src = this.ctx.createBufferSource();
+      src.buffer = buf;
+      const filt = this.ctx.createBiquadFilter();
+      filt.type = 'lowpass';
+      filt.frequency.value = 400;
+      const g = this.ctx.createGain();
+      g.gain.value = (0.04 + Math.random() * 0.04) * (1 - i / (count + 1));
+      src.connect(filt).connect(g).connect(this.sfxGain);
+      src.start(t + delay);
+    }
+  }
+  creak() {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    const duration = 0.8 + Math.random() * 0.6;
     const osc = this.ctx.createOscillator();
     osc.type = 'sawtooth';
-    osc.frequency.value = 55;
-    const lfo = this.ctx.createOscillator();
-    lfo.frequency.value = 0.7;
-    const lfoG = this.ctx.createGain();
-    lfoG.gain.value = 18;
-    lfo.connect(lfoG).connect(osc.frequency);
+    const startF = 80 + Math.random() * 40;
+    const endF = startF * (0.4 + Math.random() * 0.3);
+    osc.frequency.setValueAtTime(startF, t);
+    osc.frequency.exponentialRampToValueAtTime(endF, t + duration);
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.value = 300;
+    filter.Q.value = 12;
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(0.08, t + duration * 0.3);
+    g.gain.exponentialRampToValueAtTime(0.001, t + duration);
+    osc.connect(filter).connect(g).connect(this.sfxGain);
+    osc.start(t);
+    osc.stop(t + duration);
+  }
+  distantImpact() {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(60, t);
+    osc.frequency.exponentialRampToValueAtTime(20, t + 0.4);
+    const og = this.ctx.createGain();
+    og.gain.setValueAtTime(0.15, t);
+    og.gain.exponentialRampToValueAtTime(0.001, t + 0.6);
+    osc.connect(og).connect(this.sfxGain);
+    osc.start(t);
+    osc.stop(t + 0.6);
+    const len = (this.ctx.sampleRate * 0.4) | 0;
+    const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+    const src = this.ctx.createBufferSource();
+    src.buffer = buf;
     const filt = this.ctx.createBiquadFilter();
     filt.type = 'lowpass';
-    filt.frequency.value = 240;
+    filt.frequency.value = 200;
     const g = this.ctx.createGain();
-    g.gain.value = 0;
-    osc.connect(filt).connect(g).connect(this.master);
-    osc.start();
-    lfo.start();
-    this.growlGain = g;
+    g.gain.value = 0.04;
+    src.connect(filt).connect(g).connect(this.sfxGain);
+    src.start(t);
   }
-  setGrowl(amt) {
-    if (!this.growlGain) return;
+  wind() {
+    if (!this.ctx) return;
     const t = this.ctx.currentTime;
-    this.growlGain.gain.cancelScheduledValues(t);
-    this.growlGain.gain.linearRampToValueAtTime(amt * 0.32, t + 0.15);
+    const duration = 3 + Math.random() * 2;
+    const len = (this.ctx.sampleRate * duration) | 0;
+    const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    let last = 0;
+    for (let i = 0; i < len; i++) {
+      const w = Math.random() * 2 - 1;
+      d[i] = (last + 0.04 * w) / 1.04;
+      last = d[i];
+    }
+    const src = this.ctx.createBufferSource();
+    src.buffer = buf;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'highpass';
+    filter.frequency.value = 200;
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(0.06, t + 0.5);
+    g.gain.linearRampToValueAtTime(0, t + duration);
+    src.connect(filter).connect(g).connect(this.sfxGain);
+    src.start(t);
   }
   beat(volume = 0.35) {
     if (!this.ctx) return;
@@ -514,7 +732,7 @@ class AudioSystem {
     osc.frequency.exponentialRampToValueAtTime(34, t + 0.12);
     g.gain.setValueAtTime(volume, t);
     g.gain.exponentialRampToValueAtTime(0.001, t + 0.22);
-    osc.connect(g).connect(this.master);
+    osc.connect(g).connect(this.sfxGain);
     osc.start(t);
     osc.stop(t + 0.25);
   }
@@ -532,50 +750,72 @@ class AudioSystem {
     filt.frequency.value = 700;
     const g = this.ctx.createGain();
     g.gain.value = volume;
-    src.connect(filt).connect(g).connect(this.master);
+    src.connect(filt).connect(g).connect(this.sfxGain);
     src.start(t);
   }
-  monsterStep(distance) {
-    if (!this.ctx) return;
-    const vol = Math.max(0, 0.18 - distance * 0.012);
-    if (vol < 0.005) return;
-    const t = this.ctx.currentTime;
-    const osc = this.ctx.createOscillator();
-    const g = this.ctx.createGain();
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(90, t);
-    osc.frequency.exponentialRampToValueAtTime(22, t + 0.18);
-    g.gain.setValueAtTime(vol, t);
-    g.gain.exponentialRampToValueAtTime(0.001, t + 0.28);
-    osc.connect(g).connect(this.master);
-    osc.start(t);
-    osc.stop(t + 0.3);
-  }
+  setGrowl(_amt) { /* removed: was a positional giveaway */ }
+  monsterStep(_distance) { /* removed: was a positional giveaway */ }
   scream() {
     if (!this.ctx) return;
     const t = this.ctx.currentTime;
-    for (const f of [820, 1180, 1680, 2400, 3200]) {
-      const osc = this.ctx.createOscillator();
-      const g = this.ctx.createGain();
-      osc.type = 'sawtooth';
-      osc.frequency.setValueAtTime(f * (0.9 + Math.random() * 0.2), t);
-      osc.frequency.linearRampToValueAtTime(f * 0.35, t + 1.6);
-      g.gain.setValueAtTime(0.14, t);
-      g.gain.exponentialRampToValueAtTime(0.001, t + 1.6);
-      osc.connect(g).connect(this.master);
-      osc.start(t);
-      osc.stop(t + 1.7);
+    if (this.musicGain) {
+      const m = this.musicGain.gain;
+      m.cancelScheduledValues(t);
+      m.setValueAtTime(m.value, t);
+      m.linearRampToValueAtTime(0, t + 0.06);
+      m.linearRampToValueAtTime(0.45, t + 2.5);
     }
     const sub = this.ctx.createOscillator();
     const sg = this.ctx.createGain();
     sub.type = 'sine';
-    sub.frequency.setValueAtTime(80, t);
-    sub.frequency.exponentialRampToValueAtTime(20, t + 0.8);
-    sg.gain.setValueAtTime(0.6, t);
-    sg.gain.exponentialRampToValueAtTime(0.001, t + 1.0);
-    sub.connect(sg).connect(this.master);
-    sub.start(t);
-    sub.stop(t + 1.1);
+    sub.frequency.setValueAtTime(120, t + 0.05);
+    sub.frequency.exponentialRampToValueAtTime(28, t + 1.0);
+    sg.gain.setValueAtTime(0.78, t + 0.05);
+    sg.gain.exponentialRampToValueAtTime(0.001, t + 1.4);
+    sub.connect(sg).connect(this.sfxGain);
+    sub.start(t + 0.05);
+    sub.stop(t + 1.5);
+    for (const f of [620, 880, 1240, 1750, 2480, 3500]) {
+      const osc = this.ctx.createOscillator();
+      const g = this.ctx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(f * (0.85 + Math.random() * 0.3), t + 0.05);
+      osc.frequency.linearRampToValueAtTime(f * 0.35, t + 1.8);
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(0.16, t + 0.1);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 1.8);
+      osc.connect(g).connect(this.sfxGain);
+      osc.start(t);
+      osc.stop(t + 1.9);
+    }
+    const len = (this.ctx.sampleRate * 1.5) | 0;
+    const noiseBuf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+    const nd = noiseBuf.getChannelData(0);
+    for (let i = 0; i < len; i++) nd[i] = (Math.random() * 2 - 1) * (1 - Math.pow(i / len, 0.5));
+    const noiseSrc = this.ctx.createBufferSource();
+    noiseSrc.buffer = noiseBuf;
+    const noiseFilt = this.ctx.createBiquadFilter();
+    noiseFilt.type = 'highpass';
+    noiseFilt.frequency.value = 1500;
+    const noiseG = this.ctx.createGain();
+    noiseG.gain.value = 0.22;
+    noiseSrc.connect(noiseFilt).connect(noiseG).connect(this.sfxGain);
+    noiseSrc.start(t);
+    const swLen = (this.ctx.sampleRate * 0.4) | 0;
+    const swBuf = this.ctx.createBuffer(1, swLen, this.ctx.sampleRate);
+    const swD = swBuf.getChannelData(0);
+    for (let i = 0; i < swLen; i++) swD[i] = (Math.random() * 2 - 1) * (i / swLen);
+    const swSrc = this.ctx.createBufferSource();
+    swSrc.buffer = swBuf;
+    const swFilt = this.ctx.createBiquadFilter();
+    swFilt.type = 'bandpass';
+    swFilt.frequency.setValueAtTime(200, t);
+    swFilt.frequency.exponentialRampToValueAtTime(4000, t + 0.4);
+    swFilt.Q.value = 6;
+    const swG = this.ctx.createGain();
+    swG.gain.value = 0.4;
+    swSrc.connect(swFilt).connect(swG).connect(this.sfxGain);
+    swSrc.start(t);
   }
   win() {
     if (!this.ctx) return;
@@ -587,7 +827,7 @@ class AudioSystem {
       osc.frequency.value = f;
       g.gain.setValueAtTime(0.1, t);
       g.gain.exponentialRampToValueAtTime(0.001, t + 2.4);
-      osc.connect(g).connect(this.master);
+      osc.connect(g).connect(this.sfxGain);
       osc.start(t);
       osc.stop(t + 2.5);
     }
@@ -662,16 +902,32 @@ let maze;
 let walls = [];
 let mazeGroup;
 let goalMesh;
+
+const NUM_MONSTERS = 3;
+const MONSTER_ROLES = ['stalker', 'ambusher', 'teleporter'];
+
+let monsters = [];
+
 let monster = null;
-let monsterMixer = {
-  state: 'wander',
-  cell: { x: 8, y: 8 },
-  fromCell: { x: 8, y: 8 },
-  toCell: { x: 8, y: 8 },
-  progress: 1,
-  path: [],
-  pathTimer: 0,
-};
+let monsterMixer = null;
+
+function newMixerState() {
+  return {
+    state: 'wander',
+    role: 'stalker',
+    cell: { x: 0, y: 0 },
+    fromCell: { x: 0, y: 0 },
+    toCell: { x: 0, y: 0 },
+    progress: 1,
+    path: [],
+    pathTimer: 0,
+    stalkRepathTimer: 0,
+    stareHoldTimer: 0,
+    lastTeleport: 0,
+    ambushTarget: null,
+    ambushTimer: 0,
+  };
+}
 
 let startTime = performance.now();
 let wonTime = 0;
@@ -796,25 +1052,35 @@ function buildMaze() {
   goalLight.position.set(gx, 2.5, gz);
   goalLight.intensity = 3.0;
 
-  if (!monster) monster = makeMonster();
-  mazeGroup.add(monster);
-  let mx = MAZE_W - 1, my = MAZE_H - 1;
-  for (let i = 0; i < 30; i++) {
-    const tx = (Math.random() * MAZE_W) | 0;
-    const ty = (Math.random() * MAZE_H) | 0;
-    if (tx + ty > (MAZE_W + MAZE_H) / 2) {
-      mx = tx; my = ty;
-      break;
-    }
+  for (const m of monsters) {
+    if (m.root && m.root.parent) m.root.parent.remove(m.root);
   }
-  monsterMixer.state = 'wander';
-  monsterMixer.cell = { x: mx, y: my };
-  monsterMixer.fromCell = { x: mx, y: my };
-  monsterMixer.toCell = { x: mx, y: my };
-  monsterMixer.progress = 1;
-  monsterMixer.path = [];
-  monsterMixer.pathTimer = 0;
-  monster.position.set(mx * CELL + CELL / 2, 0, my * CELL + CELL / 2);
+  monsters = [];
+
+  for (let i = 0; i < NUM_MONSTERS; i++) {
+    const root = makeMonster();
+    mazeGroup.add(root);
+    const mixer = newMixerState();
+    mixer.role = MONSTER_ROLES[i];
+    let mx, my;
+    for (let attempt = 0; attempt < 30; attempt++) {
+      mx = (Math.random() * MAZE_W) | 0;
+      my = (Math.random() * MAZE_H) | 0;
+      const distFromPlayer = Math.abs(mx) + Math.abs(my);
+      const tooCloseToOther = monsters.some((other) => {
+        return Math.abs(other.mixer.cell.x - mx) + Math.abs(other.mixer.cell.y - my) < 4;
+      });
+      if (distFromPlayer > 6 && !tooCloseToOther) break;
+    }
+    mixer.cell = { x: mx, y: my };
+    mixer.fromCell = { x: mx, y: my };
+    mixer.toCell = { x: mx, y: my };
+    mixer.lastTeleport = performance.now() / 1000;
+    root.position.set(mx * CELL + CELL / 2, 0, my * CELL + CELL / 2);
+    monsters.push({ root, mixer, role: MONSTER_ROLES[i] });
+  }
+  monster = monsters[0].root;
+  monsterMixer = monsters[0].mixer;
 
   yaw.position.set(CELL / 2, EYE, CELL / 2);
   yaw.rotation.set(0, 0, 0);
@@ -828,535 +1094,488 @@ function buildMaze() {
 }
 
 /* ============================================================
-   MONSTER — flesh textures
+   MONSTER — geometry helpers
    ============================================================ */
-function makeSkinTexture() {
-  const s = 512, c = document.createElement('canvas');
+function makeSuitTexture() {
+  const s = 256, c = document.createElement('canvas');
   c.width = c.height = s;
   const x = c.getContext('2d');
-
-  // Sickly pale base
-  x.fillStyle = '#b8a08c';
+  x.fillStyle = '#070708';
   x.fillRect(0, 0, s, s);
-
-  // Mottled patches — bruised / sallow tones
-  const tones = ['#9c7e68', '#806050', '#a08574', '#6b4a3a', '#503020', '#b39078', '#7a5a48'];
-  for (let i = 0; i < 250; i++) {
-    const cx = Math.random() * s;
-    const cy = Math.random() * s;
-    const r = 8 + Math.random() * 50;
-    x.fillStyle = tones[(Math.random() * tones.length) | 0];
-    x.globalAlpha = 0.15 + Math.random() * 0.35;
-    x.beginPath();
-    x.arc(cx, cy, r, 0, Math.PI * 2);
-    x.fill();
-  }
-  x.globalAlpha = 1;
-
-  // Veins — dark bezier curves
-  for (let i = 0; i < 35; i++) {
-    x.strokeStyle = `rgba(${40 + (Math.random() * 30) | 0}, ${10 + (Math.random() * 20) | 0}, ${30 + (Math.random() * 30) | 0}, ${0.4 + Math.random() * 0.4})`;
-    x.lineWidth = 0.5 + Math.random() * 1.8;
-    x.beginPath();
-    let px = Math.random() * s;
-    let py = Math.random() * s;
-    x.moveTo(px, py);
-    for (let j = 0; j < 5; j++) {
-      const nx = px + (Math.random() - 0.5) * 90;
-      const ny = py + (Math.random() - 0.5) * 90;
-      const cpx = (px + nx) / 2 + (Math.random() - 0.5) * 30;
-      const cpy = (py + ny) / 2 + (Math.random() - 0.5) * 30;
-      x.quadraticCurveTo(cpx, cpy, nx, ny);
-      px = nx; py = ny;
-    }
-    x.stroke();
-  }
-
-  // Lesions / necrosis spots
-  for (let i = 0; i < 80; i++) {
-    const cx = Math.random() * s;
-    const cy = Math.random() * s;
-    const r = 1 + Math.random() * 6;
-    const grad = x.createRadialGradient(cx, cy, 0, cx, cy, r);
-    grad.addColorStop(0, `rgba(20,5,5,${0.5 + Math.random() * 0.4})`);
-    grad.addColorStop(1, 'rgba(20,5,5,0)');
-    x.fillStyle = grad;
-    x.beginPath();
-    x.arc(cx, cy, r, 0, Math.PI * 2);
-    x.fill();
-  }
-
-  // Old blood smears
-  for (let i = 0; i < 10; i++) {
-    x.strokeStyle = `rgba(60,5,5,${0.3 + Math.random() * 0.4})`;
-    x.lineWidth = 3 + Math.random() * 4;
-    x.beginPath();
-    const sx = Math.random() * s;
-    const sy = Math.random() * s;
-    x.moveTo(sx, sy);
-    x.bezierCurveTo(
-      sx + (Math.random() - 0.5) * 40, sy + 20,
-      sx + (Math.random() - 0.5) * 60, sy + 60,
-      sx + (Math.random() - 0.5) * 50, sy + 80 + Math.random() * 100
-    );
-    x.stroke();
-  }
-
-  // Pore-level noise
   for (let i = 0; i < 4000; i++) {
-    x.fillStyle = `rgba(0,0,0,${Math.random() * 0.16})`;
+    x.fillStyle = `rgba(${20 + Math.random() * 16 | 0},${18 + Math.random() * 14 | 0},${22 + Math.random() * 16 | 0},${Math.random() * 0.55})`;
+    x.fillRect(Math.random() * s, Math.random() * s, 1, 1);
+  }
+  for (let i = 0; i < 300; i++) {
+    x.fillStyle = `rgba(255,255,255,${Math.random() * 0.03})`;
+    x.fillRect(Math.random() * s, Math.random() * s, 1, 1);
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  return tex;
+}
+
+function makeFaceTexture() {
+  const s = 256, c = document.createElement('canvas');
+  c.width = c.height = s;
+  const x = c.getContext('2d');
+  x.fillStyle = '#eee5d8';
+  x.fillRect(0, 0, s, s);
+  for (let i = 0; i < 3000; i++) {
+    x.fillStyle = `rgba(${180 + Math.random() * 40 | 0},${170 + Math.random() * 30 | 0},${160 + Math.random() * 30 | 0},${Math.random() * 0.18})`;
     x.fillRect(Math.random() * s, Math.random() * s, 1, 1);
   }
   for (let i = 0; i < 1500; i++) {
-    x.fillStyle = `rgba(255,255,255,${Math.random() * 0.07})`;
+    x.fillStyle = `rgba(255,255,255,${Math.random() * 0.08})`;
     x.fillRect(Math.random() * s, Math.random() * s, 1, 1);
   }
-
   const tex = new THREE.CanvasTexture(c);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   tex.anisotropy = 4;
   return tex;
 }
 
-function makeClothTexture() {
-  const s = 256, c = document.createElement('canvas');
-  c.width = c.height = s;
-  const x = c.getContext('2d');
-  // dirty dark base
-  x.fillStyle = '#1a0d0a';
-  x.fillRect(0, 0, s, s);
-  // weave / fiber
-  for (let yy = 0; yy < s; yy += 1) {
-    for (let xx = 0; xx < s; xx += 2) {
-      const grey = 20 + Math.random() * 30;
-      x.fillStyle = `rgba(${grey},${grey * 0.7},${grey * 0.6},${0.3 + Math.random() * 0.4})`;
-      x.fillRect(xx, yy, 1, 1);
-    }
+/* ============================================================
+   MONSTER — GLB model with material override + face cover
+   ============================================================ */
+let baseGltf = null;
+let baseAnimations = null;
+
+const GLB_URL = 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@0edc965186ba1af11fd2d7cd45ecad3dbe38957f/examples/models/gltf/Soldier.glb';
+
+async function loadBaseMonsterModel() {
+  const loader = new GLTFLoader();
+  try {
+    const gltf = await loader.loadAsync(GLB_URL);
+    baseGltf = gltf.scene;
+    baseAnimations = gltf.animations;
+    window.__glbStatus = `LOADED ${baseGltf.children.length} children, ${gltf.animations.length} anims`;
+    return true;
+  } catch (e) {
+    console.warn('Monster model load failed, using procedural fallback', e);
+    window.__glbStatus = 'FAILED: ' + (e && e.message);
+    baseGltf = null;
+    return false;
   }
-  // mud / blood patches
-  for (let i = 0; i < 8; i++) {
-    x.fillStyle = i < 3 ? `rgba(60,5,5,${0.4 + Math.random() * 0.4})` : `rgba(30,20,10,${0.4 + Math.random() * 0.3})`;
-    x.beginPath();
-    x.arc(Math.random() * s, Math.random() * s, 6 + Math.random() * 22, 0, Math.PI * 2);
-    x.fill();
-  }
-  // tear lines / dirt streaks
-  for (let i = 0; i < 30; i++) {
-    x.strokeStyle = `rgba(0,0,0,${0.5 + Math.random() * 0.4})`;
-    x.lineWidth = 1 + Math.random() * 2;
-    x.beginPath();
-    const sx = Math.random() * s;
-    const sy = Math.random() * s;
-    x.moveTo(sx, sy);
-    x.lineTo(sx + (Math.random() - 0.5) * 50, sy + (Math.random() - 0.5) * 80);
-    x.stroke();
-  }
-  const tex = new THREE.CanvasTexture(c);
-  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-  return tex;
 }
 
-/* ============================================================
-   MONSTER — anatomy
-   ============================================================ */
-function makeMonster() {
-  const g = new THREE.Group();
+function makeMonsterFromGLB() {
+  if (!baseGltf) return null;
+  const cloned = SkeletonUtils.clone(baseGltf);
 
-  const skinTex = makeSkinTexture();
-  const skin = new THREE.MeshStandardMaterial({
-    map: skinTex,
-    color: 0xfff0e0,
-    roughness: 0.78,
-    metalness: 0.0,
-    emissive: 0x180810,
-    emissiveIntensity: 0.18,
-  });
-  const dark = new THREE.MeshStandardMaterial({
-    color: 0x050202,
-    roughness: 1, metalness: 0,
-  });
-  const cloth = new THREE.MeshStandardMaterial({
-    map: makeClothTexture(),
-    color: 0x4a2820,
-    roughness: 1, metalness: 0,
-    side: THREE.DoubleSide,
+  const suitMat = new THREE.MeshStandardMaterial({
+    color: 0x080808,
+    roughness: 0.45,
+    metalness: 0.12,
   });
 
-  // ROOT: monster origin at floor level, character is ~2.3 tall hunched
-  // Pelvis is the master hierarchy node — limbs hang from it
-  const pelvis = new THREE.Group();
-  pelvis.position.y = 1.0;
-  g.add(pelvis);
-
-  // ===== TORSO =====
-  // Slightly hunched cage — capsule scaled
-  const torsoGeo = new THREE.CapsuleGeometry(0.22, 0.7, 8, 14);
-  const torso = new THREE.Mesh(torsoGeo, skin);
-  torso.position.y = 0.55;
-  torso.scale.set(1.25, 1.0, 0.7); // wider shoulders, flat front-back
-  torso.rotation.x = 0.18; // forward hunch
-  pelvis.add(torso);
-
-  // Visible sternum / ribcage indent
-  for (let i = 0; i < 5; i++) {
-    const rib = new THREE.Mesh(
-      new THREE.TorusGeometry(0.22, 0.012, 6, 14, Math.PI * 0.95),
-      dark
-    );
-    rib.rotation.z = Math.PI / 2;
-    rib.position.set(0, 0.35 + i * 0.09, -0.05 + i * 0.02);
-    rib.scale.set(0.9, 0.5, 0.9);
-    pelvis.add(rib);
-  }
-
-  // ===== NECK =====
-  const neck = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.085, 0.11, 0.32, 12),
-    skin
-  );
-  neck.position.set(0, 1.05, 0.06);
-  neck.rotation.x = 0.3; // pronounced forward
-  pelvis.add(neck);
-
-  // ===== HEAD =====
-  const headGroup = new THREE.Group();
-  headGroup.position.set(0, 1.28, 0.16);
-  headGroup.rotation.x = 0.25;
-  pelvis.add(headGroup);
-
-  // Skull — elongated, sunken
-  const skull = new THREE.Mesh(
-    new THREE.SphereGeometry(0.2, 28, 22),
-    skin
-  );
-  skull.scale.set(0.82, 1.05, 1.1);
-  // Sink the cheeks: pull side vertices inward
-  {
-    const pos = skull.geometry.attributes.position;
-    for (let i = 0; i < pos.count; i++) {
-      const x = pos.getX(i);
-      const y = pos.getY(i);
-      const z = pos.getZ(i);
-      // Make temples / cheek hollows
-      if (y < 0.05 && y > -0.12 && Math.abs(x) > 0.08) {
-        pos.setX(i, x * 0.78);
-      }
-      // Brow ridge: pull forward small region
-      if (y > 0.04 && y < 0.12 && z < -0.08) {
-        pos.setZ(i, z * 1.12);
-      }
-      // Chin point
-      if (y < -0.14 && Math.abs(x) < 0.08) {
-        pos.setZ(i, z - 0.04);
-      }
+  cloned.traverse((node) => {
+    if (node.isMesh) {
+      node.material = suitMat;
+      node.castShadow = false;
+      node.receiveShadow = false;
+      node.frustumCulled = false;
     }
-    pos.needsUpdate = true;
-    skull.geometry.computeVertexNormals();
-  }
-  headGroup.add(skull);
-
-  // Jaw — protruding lower
-  const jaw = new THREE.Mesh(
-    new THREE.SphereGeometry(0.13, 16, 12), skin
-  );
-  jaw.scale.set(0.85, 0.55, 1.0);
-  jaw.position.set(0, -0.12, -0.05);
-  headGroup.add(jaw);
-
-  // Mouth cavity — dark interior, slightly agape
-  const mouth = new THREE.Mesh(
-    new THREE.SphereGeometry(0.085, 14, 10), dark
-  );
-  mouth.scale.set(1, 0.45, 0.55);
-  mouth.position.set(0, -0.075, -0.15);
-  headGroup.add(mouth);
-
-  // Teeth — small irregular cones around the mouth opening
-  const toothMat = new THREE.MeshStandardMaterial({
-    color: 0xc0a880, roughness: 0.4, metalness: 0.1,
-    emissive: 0x100808, emissiveIntensity: 0.05,
   });
-  for (let i = 0; i < 7; i++) {
-    const t = new THREE.Mesh(
-      new THREE.ConeGeometry(0.012, 0.04 + Math.random() * 0.02, 5),
-      toothMat
-    );
-    const a = (i / 7 - 0.5) * 0.9;
-    t.position.set(Math.sin(a) * 0.08, -0.04, -0.18 - Math.cos(a) * 0.02);
-    t.rotation.x = Math.PI; // pointing down from upper jaw
-    t.rotation.z = a * 0.4;
-    headGroup.add(t);
-  }
-  for (let i = 0; i < 6; i++) {
-    const t = new THREE.Mesh(
-      new THREE.ConeGeometry(0.012, 0.03 + Math.random() * 0.02, 5),
-      toothMat
-    );
-    const a = (i / 6 - 0.4) * 0.85;
-    t.position.set(Math.sin(a) * 0.07, -0.11, -0.18 - Math.cos(a) * 0.015);
-    t.rotation.z = a * 0.4;
-    headGroup.add(t);
+
+  let headBone = null;
+  cloned.traverse((node) => {
+    if (node.isBone) {
+      const name = (node.name || '').toLowerCase();
+      if (name.includes('head') && !headBone) headBone = node;
+    }
+  });
+
+  const headWrapper = new THREE.Group();
+  if (headBone) {
+    headBone.add(headWrapper);
+  } else {
+    cloned.add(headWrapper);
+    headWrapper.position.y = 1.7;
   }
 
-  // EYES — sunken hollow sockets with tiny pale pupils inside
-  const socketMat = new THREE.MeshStandardMaterial({
-    color: 0x000000, roughness: 0.6, metalness: 0,
+  const skinMat = new THREE.MeshStandardMaterial({
+    color: 0xf5e8d2,
+    roughness: 0.55,
+    metalness: 0.02,
+    emissive: 0x150810,
+    emissiveIntensity: 0.08,
   });
-  const pupilMat = new THREE.MeshStandardMaterial({
+  const face = new THREE.Mesh(new THREE.SphereGeometry(0.13, 32, 24), skinMat);
+  face.scale.set(0.85, 1.15, 0.95);
+  face.position.set(0, 0.05, 0);
+  face.renderOrder = 1;
+  headWrapper.add(face);
+
+  const eyeMat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
-    emissive: 0xfff0c8,
-    emissiveIntensity: 3.5,
-    roughness: 0.25, metalness: 0.5,
+    emissive: 0xfff5d0,
+    emissiveIntensity: 3.0,
+    roughness: 0.2,
+    metalness: 0.5,
   });
   for (const ex of [-1, 1]) {
-    // Socket — recessed dark cavity
-    const socket = new THREE.Mesh(
-      new THREE.SphereGeometry(0.052, 14, 12), socketMat
-    );
-    socket.scale.set(1.1, 0.95, 0.85);
-    socket.position.set(ex * 0.082, 0.025, -0.16);
-    headGroup.add(socket);
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.012, 10, 8), eyeMat);
+    eye.position.set(ex * 0.04, 0.05, -0.115);
+    headWrapper.add(eye);
+  }
+  const eyeLight = new THREE.PointLight(0xfff0c0, 0.3, 1.4, 2.0);
+  eyeLight.position.set(0, 0.05, -0.13);
+  headWrapper.add(eyeLight);
 
-    // Pupil deep inside socket — tiny, terrified
-    const pupil = new THREE.Mesh(
-      new THREE.SphereGeometry(0.016, 10, 8), pupilMat
-    );
-    pupil.position.set(ex * 0.082, 0.025, -0.205);
-    headGroup.add(pupil);
+  cloned.scale.set(0.78, 1.25, 0.78);
 
-    // Brow ridge — small dark sliver over each eye
-    const brow = new THREE.Mesh(
-      new THREE.BoxGeometry(0.08, 0.012, 0.04), dark
-    );
-    brow.position.set(ex * 0.082, 0.085, -0.18);
-    brow.rotation.z = ex * -0.2;
-    headGroup.add(brow);
+  const outer = new THREE.Group();
+  outer.add(cloned);
+  outer.userData.skinned = cloned;
+  outer.userData.head = headWrapper;
+  outer.userData.isGLB = true;
+
+  if (baseAnimations && baseAnimations.length) {
+    const mixer = new THREE.AnimationMixer(cloned);
+    const actions = [];
+    let walkClip = baseAnimations[0];
+    for (const clip of baseAnimations) {
+      const n = (clip.name || '').toLowerCase();
+      if (n.includes('walk') || n.includes('run')) {
+        walkClip = clip;
+        break;
+      }
+    }
+    const action = mixer.clipAction(walkClip);
+    action.play();
+    action.setEffectiveWeight(0);
+    actions.push(action);
+    outer.userData.animMixer = mixer;
+    outer.userData.animActions = actions;
   }
 
-  // Subtle eye glow light
-  const eyeLight = new THREE.PointLight(0xfff0c8, 0.45, 2.2, 2.0);
-  eyeLight.position.set(0, 0.025, -0.22);
+  return outer;
+}
+
+function makeMonster() {
+  const fromModel = makeMonsterFromGLB();
+  if (fromModel) return fromModel;
+  return makeProceduralMonster();
+}
+
+function makeProceduralMonster() {
+  const g = new THREE.Group();
+
+  const suit = new THREE.MeshStandardMaterial({
+    map: makeSuitTexture(),
+    color: 0x0a0a0c,
+    roughness: 0.45,
+    metalness: 0.12,
+  });
+  const shirt = new THREE.MeshStandardMaterial({
+    color: 0xe8e8e8,
+    roughness: 0.75,
+    metalness: 0.0,
+  });
+  const tieMat = new THREE.MeshStandardMaterial({
+    color: 0x0a0a0a,
+    roughness: 0.4,
+    metalness: 0.2,
+  });
+  const skin = new THREE.MeshStandardMaterial({
+    map: makeFaceTexture(),
+    color: 0xf5ece0,
+    roughness: 0.55,
+    metalness: 0.02,
+    emissive: 0x0a0808,
+    emissiveIntensity: 0.05,
+  });
+  const tendril = new THREE.MeshStandardMaterial({
+    color: 0x040404,
+    roughness: 0.9,
+    metalness: 0.0,
+  });
+
+  const pelvis = new THREE.Group();
+  pelvis.position.y = 1.55;
+  g.add(pelvis);
+
+  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.22, 0.95, 10, 18), suit);
+  torso.position.y = 0.7;
+  torso.scale.set(1.05, 1.0, 0.55);
+  pelvis.add(torso);
+
+  const shirtFront = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.16, 0.95),
+    shirt
+  );
+  shirtFront.position.set(0, 0.7, -0.16);
+  shirtFront.rotation.y = Math.PI;
+  pelvis.add(shirtFront);
+
+  const tie = new THREE.Mesh(new THREE.PlaneGeometry(0.06, 0.7), tieMat);
+  tie.position.set(0, 0.62, -0.165);
+  tie.rotation.y = Math.PI;
+  pelvis.add(tie);
+
+  const tieKnot = new THREE.Mesh(
+    new THREE.BoxGeometry(0.085, 0.08, 0.03),
+    tieMat
+  );
+  tieKnot.position.set(0, 1.0, -0.16);
+  pelvis.add(tieKnot);
+
+  const lapelL = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.16, 0.42),
+    suit
+  );
+  lapelL.position.set(-0.09, 0.95, -0.155);
+  lapelL.rotation.set(0, Math.PI, 0.28);
+  pelvis.add(lapelL);
+  const lapelR = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.16, 0.42),
+    suit
+  );
+  lapelR.position.set(0.09, 0.95, -0.155);
+  lapelR.rotation.set(0, Math.PI, -0.28);
+  pelvis.add(lapelR);
+
+  const collarL = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.07, 0.15),
+    shirt
+  );
+  collarL.position.set(-0.05, 1.13, -0.16);
+  collarL.rotation.set(0, Math.PI, 0.4);
+  pelvis.add(collarL);
+  const collarR = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.07, 0.15),
+    shirt
+  );
+  collarR.position.set(0.05, 1.13, -0.16);
+  collarR.rotation.set(0, Math.PI, -0.4);
+  pelvis.add(collarR);
+
+  const neck = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.075, 0.085, 0.3, 12),
+    skin
+  );
+  neck.position.set(0, 1.25, 0);
+  pelvis.add(neck);
+
+  const headGroup = new THREE.Group();
+  headGroup.position.set(0, 1.5, 0);
+  pelvis.add(headGroup);
+
+  const head = new THREE.Mesh(
+    new THREE.SphereGeometry(0.18, 32, 24),
+    skin
+  );
+  head.scale.set(0.88, 1.15, 0.95);
+  headGroup.add(head);
+
+  const eyeMat = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    emissive: 0xfff8e0,
+    emissiveIntensity: 2.8,
+    roughness: 0.2,
+    metalness: 0.6,
+  });
+  for (const ex of [-1, 1]) {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.012, 10, 8), eyeMat);
+    eye.position.set(ex * 0.055, 0.04, -0.165);
+    headGroup.add(eye);
+  }
+  const eyeLight = new THREE.PointLight(0xfff5dd, 0.35, 1.6, 2.0);
+  eyeLight.position.set(0, 0.04, -0.18);
   headGroup.add(eyeLight);
 
-  // STRINGY HAIR — lots of dangling strands
-  for (let i = 0; i < 60; i++) {
-    const len = 0.28 + Math.random() * 0.42;
-    const strand = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.004, 0.002, len, 4),
-      dark
-    );
-    const theta = Math.random() * Math.PI * 2;
-    const phi = Math.random() * 0.5; // top half of head
-    const rad = 0.2;
-    strand.position.set(
-      Math.sin(theta) * Math.cos(phi) * rad * 0.85,
-      Math.sin(phi) * rad * 1.1 + 0.06 - len / 2,
-      Math.cos(theta) * Math.cos(phi) * rad * 0.95
-    );
-    strand.rotation.set(
-      (Math.random() - 0.5) * 0.5,
-      Math.random() * Math.PI * 2,
-      (Math.random() - 0.5) * 0.4
-    );
-    headGroup.add(strand);
-  }
-
-  // ===== ARMS (long — fingertips below knees) =====
   const limbs = {};
   for (const side of ['L', 'R']) {
     const sx = side === 'L' ? -1 : 1;
 
     const shoulder = new THREE.Group();
-    shoulder.position.set(sx * 0.32, 0.95, 0);
+    shoulder.position.set(sx * 0.28, 1.12, 0);
     pelvis.add(shoulder);
     limbs[`${side}Shoulder`] = shoulder;
 
-    // Shoulder cap
     const shoulderCap = new THREE.Mesh(
-      new THREE.SphereGeometry(0.1, 14, 10), skin
+      new THREE.SphereGeometry(0.085, 14, 10),
+      suit
     );
     shoulder.add(shoulderCap);
 
-    // Upper arm (long)
     const upperArm = new THREE.Mesh(
-      new THREE.CapsuleGeometry(0.06, 0.62, 6, 10), skin
+      new THREE.CapsuleGeometry(0.052, 0.85, 6, 12),
+      suit
     );
-    upperArm.position.set(0, -0.36, 0);
+    upperArm.position.set(0, -0.47, 0);
     shoulder.add(upperArm);
 
-    // Elbow
     const elbow = new THREE.Group();
-    elbow.position.set(0, -0.72, 0);
-    elbow.rotation.x = 0.35; // slight bend
+    elbow.position.set(0, -0.92, 0);
+    elbow.rotation.x = 0.25;
     shoulder.add(elbow);
 
     const elbowCap = new THREE.Mesh(
-      new THREE.SphereGeometry(0.07, 12, 10), skin
+      new THREE.SphereGeometry(0.055, 12, 10),
+      suit
     );
     elbow.add(elbowCap);
 
-    // Forearm (also long)
     const forearm = new THREE.Mesh(
-      new THREE.CapsuleGeometry(0.055, 0.6, 6, 10), skin
+      new THREE.CapsuleGeometry(0.048, 0.78, 6, 12),
+      suit
     );
-    forearm.position.set(0, -0.33, 0);
+    forearm.position.set(0, -0.43, 0);
     elbow.add(forearm);
 
-    // Wrist
     const wrist = new THREE.Group();
-    wrist.position.set(0, -0.66, 0);
+    wrist.position.set(0, -0.85, 0);
     elbow.add(wrist);
 
-    const palm = new THREE.Mesh(
-      new THREE.BoxGeometry(0.09, 0.14, 0.05), skin
+    const cuff = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.05, 0.05, 0.05, 12),
+      shirt
     );
-    palm.position.set(0, -0.06, 0);
+    cuff.position.set(0, 0.02, 0);
+    wrist.add(cuff);
+
+    const palm = new THREE.Mesh(
+      new THREE.BoxGeometry(0.07, 0.13, 0.04),
+      skin
+    );
+    palm.position.set(0, -0.075, 0);
     wrist.add(palm);
 
-    // FOUR CLAW FINGERS — long, segmented
     for (let f = 0; f < 4; f++) {
       const fingerGroup = new THREE.Group();
-      const fAngle = (f - 1.5) * 0.13;
-      fingerGroup.position.set(Math.sin(fAngle) * 0.035, -0.13, 0);
-      fingerGroup.rotation.x = 0.35;
-      fingerGroup.rotation.z = sx * fAngle * 0.5;
+      const fAngle = (f - 1.5) * 0.1;
+      fingerGroup.position.set(Math.sin(fAngle) * 0.025, -0.13, 0);
+      fingerGroup.rotation.x = 0.18;
+      fingerGroup.rotation.z = sx * fAngle * 0.4;
       wrist.add(fingerGroup);
 
-      // Knuckle 1
       const k1 = new THREE.Mesh(
-        new THREE.CapsuleGeometry(0.013, 0.1, 4, 6), skin
+        new THREE.CapsuleGeometry(0.008, 0.085, 4, 6),
+        skin
       );
-      k1.position.set(0, -0.06, 0);
+      k1.position.set(0, -0.05, 0);
       fingerGroup.add(k1);
 
-      // Knuckle 2 (bent further)
       const knuckle2 = new THREE.Group();
-      knuckle2.position.set(0, -0.12, 0);
-      knuckle2.rotation.x = 0.5;
+      knuckle2.position.set(0, -0.1, 0);
+      knuckle2.rotation.x = 0.3;
       fingerGroup.add(knuckle2);
 
       const k2 = new THREE.Mesh(
-        new THREE.CapsuleGeometry(0.011, 0.09, 4, 6), skin
+        new THREE.CapsuleGeometry(0.007, 0.08, 4, 6),
+        skin
       );
-      k2.position.set(0, -0.06, 0);
+      k2.position.set(0, -0.05, 0);
       knuckle2.add(k2);
 
-      // Claw tip
-      const claw = new THREE.Mesh(
-        new THREE.ConeGeometry(0.012, 0.06, 6),
-        new THREE.MeshStandardMaterial({
-          color: 0x1a0808, roughness: 0.4, metalness: 0.3,
-        })
+      const k3 = new THREE.Mesh(
+        new THREE.CapsuleGeometry(0.0065, 0.05, 4, 6),
+        skin
       );
-      claw.rotation.x = Math.PI;
-      claw.position.set(0, -0.13, 0);
-      knuckle2.add(claw);
+      k3.position.set(0, -0.11, 0);
+      knuckle2.add(k3);
     }
 
-    // Thumb (shorter, set off to the side)
     const thumb = new THREE.Mesh(
-      new THREE.CapsuleGeometry(0.014, 0.12, 4, 6), skin
+      new THREE.CapsuleGeometry(0.009, 0.1, 4, 6),
+      skin
     );
-    thumb.position.set(sx * 0.05, -0.07, 0.02);
-    thumb.rotation.z = sx * -0.7;
+    thumb.position.set(sx * 0.04, -0.08, 0.015);
+    thumb.rotation.z = sx * -0.6;
     wrist.add(thumb);
   }
 
-  // ===== LEGS (digitigrade — bent backwards) =====
   for (const side of ['L', 'R']) {
     const sx = side === 'L' ? -1 : 1;
 
     const hip = new THREE.Group();
-    hip.position.set(sx * 0.13, -0.05, 0);
+    hip.position.set(sx * 0.1, -0.05, 0);
     pelvis.add(hip);
     limbs[`${side}Hip`] = hip;
 
-    // Thigh
     const thigh = new THREE.Mesh(
-      new THREE.CapsuleGeometry(0.1, 0.42, 8, 12), skin
+      new THREE.CapsuleGeometry(0.075, 0.75, 8, 14),
+      suit
     );
-    thigh.position.set(0, -0.27, 0);
+    thigh.position.set(0, -0.42, 0);
     hip.add(thigh);
 
-    // Knee (lower joint)
     const knee = new THREE.Group();
-    knee.position.set(0, -0.5, 0);
-    knee.rotation.x = -0.32; // digitigrade — knee bent back
+    knee.position.set(0, -0.82, 0);
     hip.add(knee);
 
     const kneeCap = new THREE.Mesh(
-      new THREE.SphereGeometry(0.1, 14, 10), skin
+      new THREE.SphereGeometry(0.075, 12, 10),
+      suit
     );
     knee.add(kneeCap);
 
-    // Shin
     const shin = new THREE.Mesh(
-      new THREE.CapsuleGeometry(0.08, 0.42, 8, 12), skin
+      new THREE.CapsuleGeometry(0.065, 0.65, 8, 14),
+      suit
     );
-    shin.position.set(0, -0.27, 0);
+    shin.position.set(0, -0.38, 0);
     knee.add(shin);
 
-    // Ankle
     const ankle = new THREE.Group();
-    ankle.position.set(0, -0.52, 0);
-    ankle.rotation.x = 0.5; // foot angles forward
+    ankle.position.set(0, -0.72, 0);
     knee.add(ankle);
 
-    // Foot — narrow, pointed
-    const foot = new THREE.Mesh(
-      new THREE.ConeGeometry(0.07, 0.22, 8), skin
+    const shoe = new THREE.Mesh(
+      new THREE.BoxGeometry(0.1, 0.075, 0.24),
+      new THREE.MeshStandardMaterial({
+        color: 0x040404,
+        roughness: 0.25,
+        metalness: 0.4,
+      })
     );
-    foot.rotation.x = Math.PI / 2;
-    foot.position.set(0, -0.04, -0.1);
-    ankle.add(foot);
+    shoe.position.set(0, -0.04, -0.06);
+    ankle.add(shoe);
+  }
 
-    // Toe claws
-    for (let tt = 0; tt < 3; tt++) {
-      const claw = new THREE.Mesh(
-        new THREE.ConeGeometry(0.012, 0.05, 5),
-        new THREE.MeshStandardMaterial({ color: 0x1a0808, roughness: 0.4 })
+  const tendrilsGroup = new THREE.Group();
+  tendrilsGroup.position.y = 0.85;
+  pelvis.add(tendrilsGroup);
+  for (let t = 0; t < 4; t++) {
+    const tendrilNode = new THREE.Group();
+    const angle = -Math.PI / 2 + (t / 3 - 0.5) * 1.6;
+    tendrilNode.rotation.y = angle;
+    tendrilsGroup.add(tendrilNode);
+    let parent = tendrilNode;
+    const segs = 6;
+    for (let s = 0; s < segs; s++) {
+      const r = 0.045 - s * 0.005;
+      const segLen = 0.32;
+      const seg = new THREE.Mesh(
+        new THREE.CapsuleGeometry(r, segLen, 4, 6),
+        tendril
       );
-      claw.rotation.x = Math.PI / 2;
-      claw.position.set((tt - 1) * 0.025, -0.04, -0.22);
-      ankle.add(claw);
+      seg.position.y = -segLen / 2;
+      const segGroup = new THREE.Group();
+      segGroup.position.y = s === 0 ? 0.2 : -segLen;
+      segGroup.add(seg);
+      parent.add(segGroup);
+      parent = segGroup;
     }
+    tendrilNode.userData.segments = (() => {
+      const arr = [];
+      let p = tendrilNode;
+      while (p.children.length) {
+        const next = p.children.find((c) => c.type === 'Group');
+        if (!next) break;
+        arr.push(next);
+        p = next;
+      }
+      return arr;
+    })();
   }
-
-  // ===== TATTERED ROBE — strips of cloth around waist =====
-  for (let i = 0; i < 18; i++) {
-    const len = 0.35 + Math.random() * 0.55;
-    const w = 0.1 + Math.random() * 0.12;
-    const strip = new THREE.Mesh(
-      new THREE.PlaneGeometry(w, len),
-      cloth
-    );
-    const angle = (i / 18) * Math.PI * 2;
-    const r = 0.26 + Math.random() * 0.04;
-    strip.position.set(
-      Math.sin(angle) * r,
-      -0.18 - len / 2 + (Math.random() - 0.5) * 0.05,
-      Math.cos(angle) * r
-    );
-    // Face outward
-    strip.rotation.y = angle + Math.PI + (Math.random() - 0.5) * 0.25;
-    // Slight sway tilt
-    strip.rotation.x = (Math.random() - 0.5) * 0.18;
-    strip.rotation.z = (Math.random() - 0.5) * 0.12;
-    pelvis.add(strip);
-  }
-
-  // Shoulder shroud — cape-like piece over the back
-  const shroud = new THREE.Mesh(
-    new THREE.PlaneGeometry(0.7, 0.85),
-    cloth
-  );
-  shroud.position.set(0, 0.55, 0.14);
-  shroud.rotation.x = -0.1;
-  pelvis.add(shroud);
 
   g.userData.head = headGroup;
   g.userData.pelvis = pelvis;
   g.userData.limbs = limbs;
+  g.userData.tendrils = tendrilsGroup;
   return g;
 }
 
@@ -1368,9 +1587,54 @@ function playerCell() {
 }
 
 function distanceToPlayer() {
+  if (!monster) return Infinity;
   const dx = monster.position.x - yaw.position.x;
   const dz = monster.position.z - yaw.position.z;
   return Math.hypot(dx, dz);
+}
+
+function distanceMonsterToPlayer(m) {
+  const dx = m.root.position.x - yaw.position.x;
+  const dz = m.root.position.z - yaw.position.z;
+  return Math.hypot(dx, dz);
+}
+
+function isMonsterInPlayerView(m) {
+  if (!m || !m.root) return false;
+  const dx = m.root.position.x - yaw.position.x;
+  const dz = m.root.position.z - yaw.position.z;
+  const len = Math.hypot(dx, dz);
+  if (len < 0.4) return true;
+  const nx = dx / len, nz = dz / len;
+  const fx = -Math.sin(yaw.rotation.y);
+  const fz = -Math.cos(yaw.rotation.y);
+  const dot = nx * fx + nz * fz;
+  if (dot < 0.45) return false;
+  return hasLineOfSight(yaw.position.x, yaw.position.z, m.root.position.x, m.root.position.z);
+}
+
+function findTeleportCellBehindPlayer() {
+  const fx = -Math.sin(yaw.rotation.y);
+  const fz = -Math.cos(yaw.rotation.y);
+  const bx = -fx;
+  const bz = -fz;
+  const playerC = playerCell();
+  const candidates = [];
+  for (let r = 5; r <= 9; r++) {
+    for (let off = -2; off <= 2; off++) {
+      const ang = Math.atan2(bz, bx) + (off * 0.4);
+      const tx = Math.round(playerC.x + Math.cos(ang) * r);
+      const ty = Math.round(playerC.y + Math.sin(ang) * r);
+      if (tx < 0 || tx >= MAZE_W || ty < 0 || ty >= MAZE_H) continue;
+      const candWorldX = tx * CELL + CELL / 2;
+      const candWorldZ = ty * CELL + CELL / 2;
+      const visible = hasLineOfSight(yaw.position.x, yaw.position.z, candWorldX, candWorldZ);
+      if (visible) continue;
+      candidates.push({ x: tx, y: ty, r });
+    }
+  }
+  if (!candidates.length) return null;
+  return candidates[(Math.random() * candidates.length) | 0];
 }
 
 function chooseRandomNeighbor(cell) {
@@ -1380,41 +1644,191 @@ function chooseRandomNeighbor(cell) {
   return nbs[(Math.random() * nbs.length) | 0];
 }
 
-function updateMonster(dt, sprinting) {
-  if (!monster || !maze) return undefined;
+/* ============================================================
+   LINE OF SIGHT (cell-based ray-march)
+   ============================================================ */
+function hasLineOfSight(fromX, fromZ, toX, toZ) {
+  if (!maze) return true;
+  const dx = toX - fromX;
+  const dz = toZ - fromZ;
+  const len = Math.hypot(dx, dz);
+  if (len < 0.01) return true;
+  const stepSize = 0.18;
+  const steps = Math.ceil(len / stepSize);
+  let prevCx = Math.floor(fromX / CELL);
+  let prevCy = Math.floor(fromZ / CELL);
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps;
+    const x = fromX + dx * t;
+    const z = fromZ + dz * t;
+    const cx = Math.floor(x / CELL);
+    const cy = Math.floor(z / CELL);
+    if (cx === prevCx && cy === prevCy) continue;
+    if (cx < 0 || cx >= MAZE_W || cy < 0 || cy >= MAZE_H) return false;
+    if (cx !== prevCx) {
+      if (cx > prevCx) {
+        if (maze[prevCy][prevCx].E) return false;
+      } else {
+        if (maze[prevCy][prevCx].W) return false;
+      }
+    }
+    if (cy !== prevCy) {
+      if (cy > prevCy) {
+        if (maze[prevCy][prevCx].S) return false;
+      } else {
+        if (maze[prevCy][prevCx].N) return false;
+      }
+    }
+    prevCx = cx;
+    prevCy = cy;
+  }
+  return true;
+}
 
-  monsterMixer.pathTimer -= dt;
-  const distWorld = distanceToPlayer();
-  const distCells = cellDist(monsterMixer.cell, playerCell());
+function isInPlayerView() {
+  if (!monster) return false;
+  const dx = monster.position.x - yaw.position.x;
+  const dz = monster.position.z - yaw.position.z;
+  const len = Math.hypot(dx, dz);
+  if (len < 0.4) return true;
+  const nx = dx / len, nz = dz / len;
+  const fx = -Math.sin(yaw.rotation.y);
+  const fz = -Math.cos(yaw.rotation.y);
+  const dot = nx * fx + nz * fz;
+  if (dot < 0.45) return false;
+  return hasLineOfSight(yaw.position.x, yaw.position.z, monster.position.x, monster.position.z);
+}
+
+/* ============================================================
+   MONSTER AI — stalking state machine
+     wander  : far away, random walk
+     stalk   : maintain 3-5 cells from player, follow path with delay
+     hunt    : BFS straight to player, fast
+     stare   : in player view, frozen
+   ============================================================ */
+
+
+function pickStalkAnchor(playerC, monsterC) {
+  const path = bfsPath(monsterC, playerC);
+  if (!path || path.length === 0) return monsterC;
+  const stopBack = 4;
+  const idx = Math.max(0, path.length - stopBack);
+  return path[idx];
+}
+
+function updateMonsters(dt, sprinting) {
+  if (!monsters.length || !maze) return undefined;
+  let nearest = Infinity;
+  for (const m of monsters) {
+    const d = updateOneMonster(m, dt, sprinting);
+    if (d !== undefined && d < nearest) nearest = d;
+  }
+  return nearest;
+}
+
+function updateOneMonster(m, dt, sprinting) {
+  if (!m || !m.root || !maze) return undefined;
+  const monster = m.root;
+  const monsterMixer = m.mixer;
+
+  const distWorld = distanceMonsterToPlayer(m);
+  const playerC = playerCell();
+  const monsterC = monsterMixer.cell;
+  const distCells = cellDist(monsterC, playerC);
+  const inView = isMonsterInPlayerView(m);
+
+  if (inView) monsterMixer.stareHoldTimer = 0.45;
+  else monsterMixer.stareHoldTimer = Math.max(0, monsterMixer.stareHoldTimer - dt);
+  const staring = monsterMixer.stareHoldTimer > 0;
 
   const heard = sprinting && distCells <= MONSTER_HEAR_RADIUS;
-  const sees = distCells <= MONSTER_SIGHT_RADIUS;
-  if (heard || sees) {
-    monsterMixer.state = 'hunt';
-    monsterMixer.pathTimer = Math.min(monsterMixer.pathTimer, 0);
-  }
+  const veryClose = distCells <= 3;
+  const losToPlayer = hasLineOfSight(monster.position.x, monster.position.z, yaw.position.x, yaw.position.z);
 
-  if (monsterMixer.pathTimer <= 0 && monsterMixer.state === 'hunt') {
-    const target = playerCell();
-    const path = bfsPath(monsterMixer.cell, target);
-    monsterMixer.path = path || [];
-    monsterMixer.pathTimer = MONSTER_REPATH_INTERVAL;
-    if ((!path || path.length === 0) && !sees && !heard) {
-      monsterMixer.state = 'wander';
+  if (monsterMixer.role === 'teleporter' && !inView) {
+    const now = performance.now() / 1000;
+    const sinceTeleport = now - monsterMixer.lastTeleport;
+    const minCooldown = monsterMixer.state === 'hunt' ? 9 : 6;
+    if (sinceTeleport > minCooldown && distCells > 4) {
+      const dest = findTeleportCellBehindPlayer();
+      if (dest) {
+        monsterMixer.cell = { x: dest.x, y: dest.y };
+        monsterMixer.fromCell = { x: dest.x, y: dest.y };
+        monsterMixer.toCell = { x: dest.x, y: dest.y };
+        monsterMixer.progress = 1;
+        monsterMixer.path = [];
+        monsterMixer.pathTimer = 0;
+        monsterMixer.lastTeleport = now;
+        monster.position.x = dest.x * CELL + CELL / 2;
+        monster.position.z = dest.y * CELL + CELL / 2;
+      }
     }
   }
+  const directSees = losToPlayer && distCells <= MONSTER_SIGHT_RADIUS;
 
-  const speed = monsterMixer.state === 'hunt' ? MONSTER_SPEED_HUNT : MONSTER_SPEED_IDLE;
+  let newState = monsterMixer.state;
+  if (staring) {
+    newState = 'stare';
+  } else if (heard || veryClose || directSees) {
+    newState = 'hunt';
+  } else if (distCells <= 12) {
+    newState = monsterMixer.role === 'ambusher' ? 'stalk' : 'stalk';
+  } else {
+    newState = 'wander';
+  }
+  if (monsterMixer.role === 'ambusher' && newState === 'stalk') {
+    monsterMixer.ambushTimer -= dt;
+    if (!monsterMixer.ambushTarget || monsterMixer.ambushTimer <= 0) {
+      const aheadDx = -Math.sin(yaw.rotation.y);
+      const aheadDz = -Math.cos(yaw.rotation.y);
+      const tx = Math.max(0, Math.min(MAZE_W - 1, Math.round(playerC.x + aheadDx * 5)));
+      const ty = Math.max(0, Math.min(MAZE_H - 1, Math.round(playerC.y + aheadDz * 5)));
+      monsterMixer.ambushTarget = { x: tx, y: ty };
+      monsterMixer.ambushTimer = 4;
+    }
+  }
+  monsterMixer.state = newState;
+
+  monsterMixer.pathTimer -= dt;
+  if (monsterMixer.pathTimer <= 0 && newState === 'hunt') {
+    const path = bfsPath(monsterC, playerC);
+    monsterMixer.path = path || [];
+    monsterMixer.pathTimer = MONSTER_REPATH_INTERVAL;
+  }
+  if (monsterMixer.stalkRepathTimer <= 0 && newState === 'stalk') {
+    let stalkAnchor;
+    if (monsterMixer.role === 'ambusher' && monsterMixer.ambushTarget) {
+      stalkAnchor = monsterMixer.ambushTarget;
+    } else {
+      stalkAnchor = pickStalkAnchor(playerC, monsterC);
+    }
+    const path = bfsPath(monsterC, stalkAnchor);
+    monsterMixer.path = path || [];
+    monsterMixer.stalkRepathTimer = monsterMixer.role === 'ambusher' ? 1.5 : 0.9;
+  }
+  monsterMixer.stalkRepathTimer -= dt;
+
+  let speed;
+  if (newState === 'stare') speed = 0;
+  else if (newState === 'hunt') speed = MONSTER_SPEED_HUNT;
+  else if (newState === 'stalk') speed = MONSTER_SPEED_STALK;
+  else speed = MONSTER_SPEED_IDLE;
+  if (inView && newState !== 'stare') speed *= 0.35;
+  if (!inView && (newState === 'hunt' || newState === 'stalk')) speed *= 1.25;
 
   if (monsterMixer.progress >= 1) {
     monsterMixer.fromCell = monsterMixer.toCell;
     monsterMixer.cell = monsterMixer.toCell;
-    audio.monsterStep(distWorld);
+    if (newState !== 'stare') {
+      audio.monsterStep(distWorld);
+    }
     let next;
-    if (monsterMixer.state === 'hunt' && monsterMixer.path.length) {
+    if ((newState === 'hunt' || newState === 'stalk') && monsterMixer.path && monsterMixer.path.length) {
       next = monsterMixer.path.shift();
-    } else {
+    } else if (newState === 'wander') {
       next = chooseRandomNeighbor(monsterMixer.cell);
+    } else {
+      next = monsterMixer.cell;
     }
     if (!next) next = monsterMixer.cell;
     monsterMixer.toCell = next;
@@ -1431,26 +1845,51 @@ function updateMonster(dt, sprinting) {
   monster.position.x = fx + (tx - fx) * monsterMixer.progress;
   monster.position.z = fz + (tz - fz) * monsterMixer.progress;
 
-  // Vertical bob — lurching, more pronounced when hunting
-  const isMoving = (tx !== fx || tz !== fz);
-  const bobSpeed = monsterMixer.state === 'hunt' ? 0.013 : 0.005;
-  monster.position.y = Math.abs(Math.sin(performance.now() * bobSpeed)) * (isMoving ? 0.08 : 0.02);
+  const isMoving = (tx !== fx || tz !== fz) && speed > 0.01;
+  const bobSpeed = newState === 'hunt' ? 0.011 : 0.005;
+  monster.position.y = newState === 'stare'
+    ? 0
+    : Math.abs(Math.sin(performance.now() * bobSpeed)) * (isMoving ? 0.06 : 0.015);
 
-  // Limb walk animation — swing hips & shoulders out of phase
+  if (monster.userData.isGLB && monster.userData.animMixer) {
+    let animSpeed;
+    if (newState === 'stare') animSpeed = 0;
+    else if (!isMoving) animSpeed = 0.001;
+    else if (newState === 'hunt') animSpeed = 1.6;
+    else if (newState === 'stalk') animSpeed = 1.0;
+    else animSpeed = 0.7;
+    monster.userData.animMixer.timeScale = animSpeed;
+    for (const action of monster.userData.animActions) {
+      action.setEffectiveWeight(1.0);
+    }
+    monster.userData.animMixer.update(dt);
+  }
+
   const limbs = monster.userData.limbs;
-  if (limbs && isMoving) {
-    const phase = performance.now() * (monsterMixer.state === 'hunt' ? 0.009 : 0.005);
+  if (limbs && isMoving && newState !== 'stare') {
+    const phase = performance.now() * (newState === 'hunt' ? 0.008 : 0.0045);
     const swing = Math.sin(phase);
-    const amp = monsterMixer.state === 'hunt' ? 0.6 : 0.35;
+    const amp = newState === 'hunt' ? 0.55 : 0.32;
     if (limbs.LHip) limbs.LHip.rotation.x =  swing * amp;
     if (limbs.RHip) limbs.RHip.rotation.x = -swing * amp;
-    if (limbs.LShoulder) limbs.LShoulder.rotation.x = -swing * amp * 0.7;
-    if (limbs.RShoulder) limbs.RShoulder.rotation.x =  swing * amp * 0.7;
+    if (limbs.LShoulder) limbs.LShoulder.rotation.x = -swing * amp * 0.6;
+    if (limbs.RShoulder) limbs.RShoulder.rotation.x =  swing * amp * 0.6;
   } else if (limbs) {
-    // settle limbs back when stationary
     for (const k of Object.keys(limbs)) {
-      limbs[k].rotation.x *= 0.9;
+      limbs[k].rotation.x *= 0.85;
     }
+  }
+
+  const tendrils = monster.userData.tendrils;
+  if (tendrils) {
+    const baseSway = Math.sin(performance.now() * 0.0015) * 0.12;
+    const aggression = newState === 'hunt' ? 0.4 : newState === 'stalk' ? 0.18 : 0.05;
+    for (let i = 0; i < tendrils.children.length; i++) {
+      const t = tendrils.children[i];
+      t.rotation.x = Math.sin(performance.now() * 0.002 + i) * (0.1 + aggression) - 0.05;
+      t.rotation.z = Math.cos(performance.now() * 0.0017 + i * 1.3) * (0.08 + aggression * 0.5);
+    }
+    tendrils.rotation.z = baseSway;
   }
 
   if (isMoving) {
@@ -1458,10 +1897,10 @@ function updateMonster(dt, sprinting) {
     let diff = target - monster.rotation.y;
     while (diff > Math.PI) diff -= Math.PI * 2;
     while (diff < -Math.PI) diff += Math.PI * 2;
-    monster.rotation.y += diff * Math.min(1, dt * 6);
+    monster.rotation.y += diff * Math.min(1, dt * 5);
   }
 
-  if (distWorld < 4) {
+  if (distWorld < 6 || newState === 'stare') {
     const target = Math.atan2(
       yaw.position.x - monster.position.x,
       yaw.position.z - monster.position.z
@@ -1469,19 +1908,25 @@ function updateMonster(dt, sprinting) {
     let diff = target - monster.rotation.y;
     while (diff > Math.PI) diff -= Math.PI * 2;
     while (diff < -Math.PI) diff += Math.PI * 2;
-    monster.rotation.y += diff * Math.min(1, dt * 4);
-    if (monster.userData.head) {
-      monster.userData.head.rotation.x = -0.3;
+    const turnRate = newState === 'stare' ? 1.2 : 3.0;
+    monster.rotation.y += diff * Math.min(1, dt * turnRate);
+    if (monster.userData.head && distWorld < 4) {
+      monster.userData.head.rotation.x = -0.12;
     }
   } else if (monster.userData.head) {
     monster.userData.head.rotation.x *= 0.9;
   }
 
-  const growlAmt = Math.max(0, Math.min(1, (12 - distWorld) / 10));
-  audio.setGrowl(growlAmt * (monsterMixer.state === 'hunt' ? 1.0 : 0.55));
+  let growlAmt;
+  if (newState === 'stare') growlAmt = 0.9;
+  else if (newState === 'hunt') growlAmt = Math.max(0, Math.min(1, (14 - distWorld) / 12)) * 1.0;
+  else if (newState === 'stalk') growlAmt = Math.max(0, Math.min(1, (14 - distWorld) / 12)) * 0.55;
+  else growlAmt = 0.0;
+  audio.setGrowl(growlAmt);
 
   return distWorld;
 }
+
 
 /* ============================================================
    CONTROLS
@@ -1735,14 +2180,22 @@ function jumpscareAndDie() {
   gameState = 'dead';
   wonTime = (performance.now() - startTime) / 1000;
   audio.scream();
-  audio.setGrowl(0);
   document.exitPointerLock();
-  drawJumpscareFace();
-  jumpscareEl.classList.add('active');
+
+  const flash = document.createElement('div');
+  flash.style.cssText = 'position:fixed;inset:0;background:#fff;z-index:151;pointer-events:none;animation:jsFlash 0.18s ease-out forwards';
+  document.body.appendChild(flash);
+  setTimeout(() => flash.remove(), 250);
+
+  setTimeout(() => {
+    drawJumpscareFace();
+    jumpscareEl.classList.add('active');
+  }, 90);
+
   setTimeout(() => {
     jumpscareEl.classList.remove('active');
     refreshOverlay();
-  }, 1400);
+  }, 1800);
 }
 
 /* ============================================================
@@ -1755,7 +2208,6 @@ function checkWin() {
   if (dx * dx + dz * dz < 1.3 * 1.3) {
     gameState = 'won';
     wonTime = (performance.now() - startTime) / 1000;
-    audio.setGrowl(0);
     audio.win();
     document.exitPointerLock();
     refreshOverlay();
@@ -1763,9 +2215,13 @@ function checkWin() {
 }
 
 function checkDeath() {
-  if (gameState !== 'playing' || !monster) return;
-  if (distanceToPlayer() < MONSTER_CATCH_DIST) {
-    jumpscareAndDie();
+  if (gameState !== 'playing') return;
+  for (const m of monsters) {
+    const d = distanceMonsterToPlayer(m);
+    if (d < MONSTER_CATCH_DIST) {
+      jumpscareAndDie();
+      return;
+    }
   }
 }
 
@@ -1822,7 +2278,7 @@ function animate() {
     camera.position.y = Math.sin(walkBob) * 0.06;
     camera.position.x = Math.cos(walkBob * 0.5) * 0.04;
 
-    monsterDist = updateMonster(dt, isSprinting);
+    monsterDist = updateMonsters(dt, isSprinting);
 
     if (monsterDist !== undefined && monsterDist < 5) {
       const shake = Math.max(0, (5 - monsterDist) / 5) * 0.06;
@@ -1865,13 +2321,24 @@ function animate() {
 /* ============================================================
    INIT
    ============================================================ */
-buildMaze();
-gameState = 'menu';
-refreshOverlay();
-animate();
+const loadingEl = document.getElementById('loading');
 
-document.getElementById('loading').style.display = 'none';
-overlay.classList.remove('hidden');
+(async () => {
+  loadingEl.textContent = 'SUMMONING…';
+  try {
+    await loadBaseMonsterModel();
+  } catch (e) {
+    console.warn('continuing without GLB', e);
+  }
+  buildMaze();
+  gameState = 'menu';
+  refreshOverlay();
+  animate();
+  loadingEl.style.display = 'none';
+  overlay.classList.remove('hidden');
+  window.__maze = { monsters: () => monsters, yaw, CELL, EYE, baseGltf: () => baseGltf, gameState: () => gameState, setGameState: (s) => { gameState = s; }, overlay };
+
+})();
 </script>
 </body>
 </html>
